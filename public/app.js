@@ -35,6 +35,9 @@ const priceCart = (cfg, products, items, mode) => Core.priceCart(cfg, products, 
 const lineFor = (item, products) => priceCart(S.cfg, products, [item], null).lines[0];
 // Inside the StoreKart Android app, window.StoreKartApp gives access to the phone (background GPS, alerts, printing)
 const Native = (window.StoreKartApp && typeof window.StoreKartApp.isApp === 'function') ? window.StoreKartApp : null;
+// Which Android app we're in: 'customer' (the shop only) or 'staff' (staff screens); null in a browser
+const AppMode = Native && typeof Native.appMode === 'function' ? Native.appMode() : null;
+const FixedStore = Native && typeof Native.fixedStore === 'function' ? Native.fixedStore() : false;
 const roleLabel = r => (Core.ROLES[r] || {}).label || r;
 const can = perm => Core.can(S.me, perm);
 
@@ -132,6 +135,7 @@ function route() {
   window.scrollTo(0, 0);
   stopPolling();
   if (!S.cfg.configured) return renderWizard();
+  if (AppMode === 'customer' && (a === 'admin' || a === 'kiosk')) return renderCustomerAppOnly();
   document.body.classList.toggle('kiosk-mode', a === 'kiosk');
   if (a === 'kiosk') return renderKiosk();
   if (a === 'admin') return renderAdmin(b || 'orders', h.split('/').slice(2).join('/'));
@@ -387,7 +391,8 @@ function storeFooter() {
       <div style="flex:1;min-width:220px">${c.phone ? `<div>📞 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div><div>💬 <a href="${waLink(c.phone, 'Hi ' + c.name + '!')}" target="_blank" rel="noopener">Chat on WhatsApp</a></div>` : ''}
         ${c.policy ? `<div style="margin-top:6px">${esc(c.policy)}</div>` : ''}</div>
     </div>
-    <div class="small"><a href="#/admin" style="color:var(--muted)">Staff login</a>${Native ? ` · <a href="#" data-act="openGpsTest" style="color:var(--muted)">App & GPS test</a> · <a href="#" data-act="changeStore" style="color:var(--muted)">Change store</a>` : ''}</div>
+    ${AppMode === 'customer' ? (FixedStore ? '' : `<div class="small"><a href="#" data-act="changeStore" style="color:var(--muted)">Change store</a></div>`)
+      : `<div class="small"><a href="#/admin" style="color:var(--muted)">Staff login</a>${Native ? ` · <a href="#" data-act="openGpsTest" style="color:var(--muted)">App & GPS test</a>${FixedStore ? '' : ` · <a href="#" data-act="changeStore" style="color:var(--muted)">Change store</a>`}` : ''}</div>`}
   </div></footer>`;
 }
 function waLink(phone, text) {
@@ -801,6 +806,10 @@ function renderMyOrders() {
     : `<div class="empty"><div class="big">🧾</div>No orders on this phone yet.</div>`}</div>`;
 }
 
+function renderCustomerAppOnly() {
+  app().innerHTML = `${storeHeader('#/')}<div class="narrow"><div class="empty"><div class="big">🛍️</div>This app is for shopping.<br>Staff use the <b>${esc(S.cfg.name)} Staff</b> app.<br><br><a class="btn primary" href="#/">Back to the shop</a></div></div>`;
+}
+
 // ================= staff area (admin / owner / manager / cashier / delivery) =================
 let events = null;
 function staffTabs() {
@@ -1145,7 +1154,7 @@ function renderMe() {
       <label class="f"><span>New</span><input type="password" id="pw-new" autocomplete="new-password"></label>
       <button class="btn" data-act="changePw">Change password</button></div>
     ${Native ? `<div class="card stack" style="margin-top:12px"><h3>📱 This phone</h3><div class="small muted">StoreKart app ${esc(Native.version())}</div>
-      <button class="btn block" data-act="openGpsTest">📍 GPS & phone test</button><button class="btn block" data-act="changeStore">🔗 Change store address</button></div>`
+      <button class="btn block" data-act="openGpsTest">📍 GPS & phone test</button>${FixedStore ? '' : '<button class="btn block" data-act="changeStore">🔗 Change store address</button>'}</div>`
       : ('Notification' in window && Notification.permission !== 'granted' ? `<button class="btn block" style="margin-top:12px" data-act="askNotify">🔔 Turn on order alerts</button>` : '')}
     <button class="btn block lg" style="margin-top:12px" data-act="logout">Log out</button>
   </div>`);

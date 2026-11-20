@@ -135,7 +135,7 @@ class GpsTestActivity : AppCompatActivity() {
         serverText = Ui.text(this, Prefs.storeUrl(this) ?: "No store address saved yet.", 14f, Ui.MUTED)
         srvCard.addView(serverText)
         srvCard.addView(Ui.button(this, "Test connection") { testServer() })
-        srvCard.addView(Ui.button(this, "Change store address") {
+        if (!Prefs.isFixed()) srvCard.addView(Ui.button(this, "Change store address") {
             startActivity(Intent(this, SetupActivity::class.java).putExtra("change", true))
         })
         col.addView(srvCard)

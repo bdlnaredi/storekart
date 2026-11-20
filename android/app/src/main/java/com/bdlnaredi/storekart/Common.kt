@@ -37,10 +37,16 @@ class StoreKartApp : Application() {
 object Prefs {
     private fun sp(ctx: Context) = ctx.getSharedPreferences("storekart", Context.MODE_PRIVATE)
 
-    fun storeUrl(ctx: Context): String? = sp(ctx).getString("url", null)
-    fun staffMode(ctx: Context): Boolean = sp(ctx).getBoolean("staff", false)
-    fun setStore(ctx: Context, url: String, staff: Boolean) {
-        sp(ctx).edit().putString("url", url).putBoolean("staff", staff).apply()
+    /** True when the store address was built into the app (GitHub secret STORE_URL) — nobody types it. */
+    fun isFixed(): Boolean = BuildConfig.STORE_URL.isNotBlank()
+
+    fun storeUrl(ctx: Context): String? = if (isFixed()) normalize(BuildConfig.STORE_URL) else sp(ctx).getString("url", null)
+
+    /** Staff app opens the staff screens; the customer app opens the shop. */
+    fun staffMode(@Suppress("UNUSED_PARAMETER") ctx: Context): Boolean = BuildConfig.STAFF
+
+    fun setStore(ctx: Context, url: String) {
+        sp(ctx).edit().putString("url", url).apply()
     }
 
     /** Tracking config kept so the GPS service can carry on if Android restarts it. */

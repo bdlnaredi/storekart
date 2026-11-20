@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">StoreKart</string>
     <string name="gps_test">GPS &amp; phone test</string>
     <string name="change_store">Change store</string>
 </resources>

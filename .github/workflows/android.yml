@@ -1,4 +1,13 @@
-name: Build Android app
+name: Build Android apps
+# Builds two apps: the customer app (the shop) and the staff app (orders, counter, deliveries, cash).
+# Your store's address and name come from repository settings, never from this public code:
+#   Settings → Secrets and variables → Actions
+#     Secrets:   STORE_URL                     e.g. https://shop.yourdomain.com   (built into both apps)
+#                STOREKART_KEYSTORE_B64        your signing key file, base64      (recommended — see android/README.md)
+#                STOREKART_KEYSTORE_PASSWORD   its password
+#     Variables: STORE_NAME                    e.g. Ganesh Kirana   (app names: "Ganesh Kirana" and "Ganesh Kirana Staff")
+#                STORE_APP_ID                  optional, e.g. com.ganeshkirana.shop (needed if you publish on Play Store)
+#                PUBLISH_APKS                  set to "false" to keep the APKs out of the public Releases page
 on:
   push:
     branches: [main]
@@ -16,24 +25,64 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build APK
+
+      - name: Check settings
+        env:
+          STORE_URL: ${{ secrets.STORE_URL }}
+          KEYSTORE_B64: ${{ secrets.STOREKART_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$STORE_URL" ]; then
+            echo "::warning::No STORE_URL secret set — the apps will ask for the store address the first time they open."
+          fi
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/storekart.jks"
+            echo "STOREKART_KEYSTORE=$RUNNER_TEMP/storekart.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No private signing key (secret STOREKART_KEYSTORE_B64) — signed with the public test key. Fine for testing, not for giving to customers."
+          fi
+
+      - name: Build both apps
         working-directory: android
+        env:
+          STORE_URL: ${{ secrets.STORE_URL }}
+          STORE_NAME: ${{ vars.STORE_NAME }}
+          STORE_APP_ID: ${{ vars.STORE_APP_ID }}
+          STOREKART_KEYSTORE_PASSWORD: ${{ secrets.STOREKART_KEYSTORE_PASSWORD }}
+          STOREKART_KEY_ALIAS: ${{ vars.STOREKART_KEY_ALIAS }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
-          cp app/build/outputs/apk/release/app-release.apk ../StoreKart.apk
+          set -o pipefail
+          if ! ./gradlew assembleCustomerRelease assembleStaffRelease --no-daemon 2>&1 | tee build.log; then
+            grep -E "^e: |error:|What went wrong|FAILED|Execution failed" build.log | head -25 | while IFS= read -r l; do echo "::warning::$l"; done
+            exit 1
+          fi
+          cp app/build/outputs/apk/customer/release/app-customer-release.apk ../StoreKart-Customer.apk
+          cp app/build/outputs/apk/staff/release/app-staff-release.apk ../StoreKart-Staff.apk
+
       - uses: actions/upload-artifact@v4
         with:
-          name: StoreKart-apk
-          path: StoreKart.apk
-      # Easy phone download: Releases → "StoreKart Android (latest)" → StoreKart.apk
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: android-latest
-          name: StoreKart Android (latest)
-          prerelease: true
-          make_latest: false
-          files: StoreKart.apk
-          body: |
-            Latest Android test build (run ${{ github.run_number }}).
-            Open this page on your phone, tap StoreKart.apk and install. Allow "Install unknown apps" for Chrome when asked.
+          name: StoreKart-apps
+          path: |
+            StoreKart-Customer.apk
+            StoreKart-Staff.apk
+
+      # The APKs have your store address inside. Set variable PUBLISH_APKS=false to keep them off the public Releases page
+      # (then download them from this run's "Artifacts" instead).
+      - name: Publish to the android-latest release
+        if: ${{ vars.PUBLISH_APKS != 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Android apps, build ${{ github.run_number }}.
+
+          • StoreKart-Customer.apk — for customers (the shop)
+          • StoreKart-Staff.apk — for staff: owner, manager, cashier, delivery boy
+
+          Open this page on the phone, tap the APK and install (allow \"Install unknown apps\" for Chrome when asked)."
+          if gh release view android-latest >/dev/null 2>&1; then
+            gh release edit android-latest --title "Android apps (build ${{ github.run_number }})" --notes "$notes" --prerelease
+          else
+            gh release create android-latest --title "Android apps (build ${{ github.run_number }})" --notes "$notes" --prerelease --latest=false
+          fi
+          gh release delete-asset android-latest StoreKart.apk -y 2>/dev/null || true
+          gh release upload android-latest StoreKart-Customer.apk StoreKart-Staff.apk --clobber

@@ -4,22 +4,23 @@ import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
 import android.widget.EditText
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
 
-/** First screen: which store does this phone connect to, and is it for a customer or staff? */
+/** Only used when no store address was built into the app: asks for it once. */
 class SetupActivity : AppCompatActivity() {
 
     private lateinit var urlBox: EditText
     private lateinit var status: TextView
-    private lateinit var staffRadio: RadioButton
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Prefs.isFixed()) { // the address is built in — nothing to set up
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK))
+            finish(); return
+        }
         val col = Ui.column(this, 20)
         col.setBackgroundColor(Ui.BG)
 
@@ -38,21 +39,13 @@ class SetupActivity : AppCompatActivity() {
         col.addView(Ui.gap(this, 12))
         col.addView(urlBox)
 
-        col.addView(Ui.gap(this, 12))
-        col.addView(Ui.text(this, "This phone is for:", 15f, Ui.INK, true))
-        val group = RadioGroup(this)
-        val customer = RadioButton(this).apply { text = "Shopping (customer)"; id = 1001 }
-        staffRadio = RadioButton(this).apply { text = "Staff — owner, manager, cashier or delivery boy"; id = 1002 }
-        group.addView(customer); group.addView(staffRadio)
-        group.check(if (Prefs.storeUrl(this) == null || Prefs.staffMode(this)) 1002 else 1001)
-        col.addView(group)
 
         status = Ui.text(this, "", 14f, Ui.MUTED)
         col.addView(Ui.gap(this, 8))
         col.addView(status)
         col.addView(Ui.button(this, "Test & continue", true) { testAndSave(false) })
         col.addView(Ui.button(this, "Save without testing") { testAndSave(true) })
-        col.addView(Ui.button(this, "📍 GPS & phone test") { startActivity(Intent(this, GpsTestActivity::class.java)) })
+        if (BuildConfig.STAFF) col.addView(Ui.button(this, "📍 GPS & phone test") { startActivity(Intent(this, GpsTestActivity::class.java)) })
 
         setContentView(ScrollView(this).apply { setBackgroundColor(Ui.BG); addView(col) })
     }
@@ -81,7 +74,7 @@ class SetupActivity : AppCompatActivity() {
     }
 
     private fun save(url: String) {
-        Prefs.setStore(this, url, staffRadio.isChecked)
+        Prefs.setStore(this, url)
         if (intent.getBooleanExtra("change", false)) finish()
         else {
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK))

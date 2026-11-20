@@ -94,7 +94,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
         setupWebView()
 
-        if (Build.VERSION.SDK_INT >= 33 && !Notifier.canPost(this)) {
+        if (BuildConfig.STAFF && Build.VERSION.SDK_INT >= 33 && !Notifier.canPost(this)) { // order alerts are for staff
             askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
@@ -188,8 +188,8 @@ class MainActivity : AppCompatActivity() {
             addView(Ui.title(this@MainActivity, "Can't reach the store").apply { gravity = Gravity.CENTER })
             addView(Ui.text(this@MainActivity, "$storeUrl\n\n$msg\n\nCheck your internet, or that the store server is running.", 14f, Ui.MUTED).apply { gravity = Gravity.CENTER })
             addView(Ui.button(this@MainActivity, "Try again", true) { hideError(); web.loadUrl(startUrl()) })
-            addView(Ui.button(this@MainActivity, "Change store address") { openSetup() })
-            addView(Ui.button(this@MainActivity, "GPS & phone test") { startActivity(Intent(this@MainActivity, GpsTestActivity::class.java)) })
+            if (!Prefs.isFixed()) addView(Ui.button(this@MainActivity, "Change store address") { openSetup() })
+            if (BuildConfig.STAFF) addView(Ui.button(this@MainActivity, "GPS & phone test") { startActivity(Intent(this@MainActivity, GpsTestActivity::class.java)) })
         }
         errorView = box
         root.addView(box, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -257,6 +257,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun startTracking(json: String) {
+        if (!BuildConfig.STAFF) return
         withLocationPermission({
             if (!LocationService.start(this, json, false)) toast(TrackingState.lastResult)
         }, { js("window.__skTrackingDenied && window.__skTrackingDenied()") })
@@ -267,7 +268,7 @@ class MainActivity : AppCompatActivity() {
         pm.print("StoreKart bill", web.createPrintDocumentAdapter("StoreKart bill"), PrintAttributes.Builder().build())
     }
 
-    fun openSetup() = startActivity(Intent(this, SetupActivity::class.java).putExtra("change", true))
+    fun openSetup() { if (!Prefs.isFixed()) startActivity(Intent(this, SetupActivity::class.java).putExtra("change", true)) }
 
     fun toast(msg: String) = runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
 }
@@ -276,20 +277,25 @@ class MainActivity : AppCompatActivity() {
 class AppBridge(private val act: MainActivity) {
     @JavascriptInterface fun isApp(): Boolean = true
     @JavascriptInterface fun version(): String = BuildConfig.VERSION_NAME
+    /** "customer" or "staff" — the web pages show only what fits the app. */
+    @JavascriptInterface fun appMode(): String = if (BuildConfig.STAFF) "staff" else "customer"
+    /** true when the store address is built in (no "change store" option). */
+    @JavascriptInterface fun fixedStore(): Boolean = Prefs.isFixed()
 
     /** Start/refresh background location sharing for the delivery boy's orders that are out for delivery. */
     @JavascriptInterface fun startTracking(json: String): String {
+        if (!BuildConfig.STAFF) return "not-in-customer-app"
         val n = try { JSONObject(json).optJSONArray("orders")?.length() ?: 0 } catch (e: Exception) { return "bad-config" }
         if (n == 0) { stopTracking(); return "stopped" }
         act.runOnUiThread { act.startTracking(json) }
         return if (act.hasLocationPermission()) "ok" else "asking-permission"
     }
 
-    @JavascriptInterface fun stopTracking() { act.runOnUiThread { LocationService.stop(act) } }
+    @JavascriptInterface fun stopTracking() { if (BuildConfig.STAFF) act.runOnUiThread { LocationService.stop(act) } }
     @JavascriptInterface fun trackingStatus(): String = TrackingState.toJson()
     @JavascriptInterface fun notify(title: String, body: String) { Notifier.orderAlert(act, title, body) }
     @JavascriptInterface fun getLocation(callbackName: String) { act.runOnUiThread { act.oneShotLocation(callbackName) } }
     @JavascriptInterface fun printPage() { act.runOnUiThread { act.printPage() } }
-    @JavascriptInterface fun openGpsTest() { act.runOnUiThread { act.startActivity(Intent(act, GpsTestActivity::class.java)) } }
+    @JavascriptInterface fun openGpsTest() { if (BuildConfig.STAFF) act.runOnUiThread { act.startActivity(Intent(act, GpsTestActivity::class.java)) } }
     @JavascriptInterface fun changeStore() { act.runOnUiThread { act.openSetup() } }
 }

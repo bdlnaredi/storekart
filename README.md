@@ -102,8 +102,8 @@ If you also run **Dukaan** (the counter billing app that sends bills to TallyPri
   - Dukaan cashiers sign in to StoreKart with their name + PIN and become StoreKart cashiers. The Dukaan owner signs in with login name `owner` and the owner password.
 - **Dukaan down:** anything for Dukaan waits in a queue (shown in Settings) and is sent once it's back.
 
-## Android app
-The `android/` folder is an Android Studio project. It gives delivery boys **live location that keeps working with the screen off**, phone notifications for order alerts, and a **📍 GPS & phone test** screen. GitHub builds the APK automatically: on your phone, open Releases → *StoreKart Android (latest)*. See `android/README.md`.
+## Android apps
+The `android/` folder builds two apps: a **customer app** (the shop) and a **staff app** (orders, counter, cash, and deliveries with live location that keeps working with the screen off). Your store's address and name are built in from your GitHub settings (secret `STORE_URL`, variable `STORE_NAME`), so they're never in this public code and nobody has to type them. GitHub builds both APKs automatically. See `android/README.md` for the one-time setup.
 
 ## Run it on Unraid
 
