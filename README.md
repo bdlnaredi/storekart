@@ -49,6 +49,9 @@ Notes:
 
 Prices are always recalculated on the server, so nobody can change a price in their browser.
 
+## Android app
+The `android/` folder is an Android Studio project. It gives delivery boys **live location that keeps working with the screen off**, phone notifications for order alerts, and a **📍 GPS & phone test** screen. GitHub builds the APK automatically: on your phone, open Releases → *StoreKart Android (latest)*. See `android/README.md`.
+
 ## Run it on Unraid
 
 **Option A — Docker Compose (Compose Manager plugin)**

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.StoreKart" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#E23744</item>
+        <item name="colorPrimaryDark">#B8222F</item>
+        <item name="colorAccent">#E23744</item>
+        <item name="android:statusBarColor">#B8222F</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

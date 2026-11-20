@@ -33,6 +33,8 @@ const imgOrEmoji = (p, fallback = '🛍️') => p.image ? `<img src="${esc(p.ima
 const Core = window.StoreCore;
 const priceCart = (cfg, products, items, mode) => Core.priceCart(cfg, products, items, mode, false);
 const lineFor = (item, products) => priceCart(S.cfg, products, [item], null).lines[0];
+// Inside the StoreKart Android app, window.StoreKartApp gives access to the phone (background GPS, alerts, printing)
+const Native = (window.StoreKartApp && typeof window.StoreKartApp.isApp === 'function') ? window.StoreKartApp : null;
 const roleLabel = r => (Core.ROLES[r] || {}).label || r;
 const can = perm => Core.can(S.me, perm);
 
@@ -363,7 +365,7 @@ function storeFooter() {
       <div style="flex:1;min-width:220px">${c.phone ? `<div>📞 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div><div>💬 <a href="${waLink(c.phone, 'Hi ' + c.name + '!')}" target="_blank" rel="noopener">Chat on WhatsApp</a></div>` : ''}
         ${c.policy ? `<div style="margin-top:6px">${esc(c.policy)}</div>` : ''}</div>
     </div>
-    <div class="small"><a href="#/admin" style="color:var(--muted)">Store admin</a></div>
+    <div class="small"><a href="#/admin" style="color:var(--muted)">Staff login</a>${Native ? ` · <a href="#" data-act="openGpsTest" style="color:var(--muted)">App & GPS test</a> · <a href="#" data-act="changeStore" style="color:var(--muted)">Change store</a>` : ''}</div>
   </div></footer>`;
 }
 function waLink(phone, text) {
@@ -719,6 +721,7 @@ function beep(times = 3) {
 }
 function alertStaff(title, body) {
   beep(); toast(`🔔 ${title}`, 'ok');
+  if (Native) { try { Native.notify(title, body || S.cfg.name); } catch {} return; }
   try { if (Notification.permission === 'granted') new Notification(title, { body }); } catch {}
 }
 // live events: new order, status change, assignment
@@ -760,7 +763,7 @@ async function renderAdminOrders() {
     <div class="row wrap" style="margin-bottom:12px">
       <div class="chips" style="padding:0">${ORDER_FILTERS.map(([k, t]) => { const n = ['new', 'topack', 'ready', 'out'].includes(k) ? count(k) : 0; return `<button class="chip ${f === k ? 'on' : ''}" data-act="ofilter" data-f="${k}">${t}${n ? ` · ${n}` : ''}</button>`; }).join('')}</div>
       <span class="spacer"></span>
-      ${'Notification' in window && Notification.permission === 'default' ? `<button class="btn sm" data-act="askNotify">🔔 Enable alerts</button>` : ''}
+      ${!Native && 'Notification' in window && Notification.permission === 'default' ? `<button class="btn sm" data-act="askNotify">🔔 Enable alerts</button>` : ''}
       <button class="btn sm" data-act="refreshOrders">↻</button>
     </div>
     ${list.length ? `<div class="olist">${list.map(orderCard).join('')}</div>` : `<div class="empty"><div class="big">📭</div>${f === 'active' || f === 'topack' ? 'Nothing waiting right now. New orders will ring here.' : 'No orders here.'}</div>`}
@@ -818,7 +821,7 @@ const Tracker = {
   bar() {
     if (!S.me || S.me.role !== 'delivery' || !this.out.length) return '';
     const cls = this.status === 'on' ? 'ok' : this.status === 'error' ? 'bad' : 'warn';
-    return `<div class="track-bar ${cls}"><div class="wrap-page row"><span class="live-dot"></span><span style="flex:1">${this.status === 'on' ? `Sharing live location with ${this.out.length} customer${this.out.length > 1 ? 's' : ''}${this.pos ? ` · ±${Math.round(this.pos.acc)} m` : ''}` : this.status === 'error' ? esc(this.err) : 'Getting your location…'}</span>${Api.demo ? `<button class="btn sm" data-act="simDrive">${this.sim ? '⏸ Stop' : '▶️ Simulate drive'}</button>` : ''}</div></div>`;
+    return `<div class="track-bar ${cls}"><div class="wrap-page row"><span class="live-dot"></span><span style="flex:1">${this.status === 'on' ? `Sharing live location with ${this.out.length} customer${this.out.length > 1 ? 's' : ''}${this.pos ? ` · ±${Math.round(this.pos.acc)} m` : ''}${Native ? ' · works with screen off' : ''}` : this.status === 'error' ? esc(this.err) : 'Getting your location…'}</span>${Native && this.status === 'error' ? `<button class="btn sm" data-act="openGpsTest">Fix</button>` : ''}${Api.demo ? `<button class="btn sm" data-act="simDrive">${this.sim ? '⏸ Stop' : '▶️ Simulate drive'}</button>` : ''}</div></div>`;
   },
   refreshBar() { const old = $('.track-bar'); const html = this.bar(); if (old) old.outerHTML = html || ''; else if (html) $('.admin-top') && $('.admin-top').insertAdjacentHTML('afterend', html); },
   async sync() {
@@ -828,6 +831,7 @@ const Tracker = {
     this.refreshBar();
   },
   start() {
+    if (Native) return this.startNative();
     if (this.watch != null || this.sim) return;
     if (!('geolocation' in navigator)) return this.setErr('This phone/browser has no GPS access.');
     if (!window.isSecureContext) return this.setErr('Live location needs the store opened over https:// (your Cloudflare domain).');
@@ -839,7 +843,23 @@ const Tracker = {
     clearInterval(this.beat);
     this.beat = setInterval(() => { if (this.pos && Date.now() - this.last > 30000) this.onPos(this.pos, true); }, 10000);
   },
+  // App: the phone's own GPS service keeps sharing even with the screen off or Google Maps open
+  startNative() {
+    const base = location.href.split('#')[0].replace(/index\.html$/, '');
+    const r = Native.startTracking(JSON.stringify({ base, token: ls.get('sk_token'), orders: this.out.map(o => ({ id: o.id, number: o.number })) }));
+    if (r === 'asking-permission') this.status = 'wait';
+    if (!this.nativePoll) this.nativePoll = setInterval(() => this.readNative(), 3000);
+    this.readNative();
+  },
+  readNative() {
+    let st = {}; try { st = JSON.parse(Native.trackingStatus()); } catch {}
+    this.native = st;
+    if (st.running && !st.test) { this.status = 'on'; if (st.fixAt) this.pos = { lat: st.lat, lng: st.lng, acc: st.acc }; }
+    else if (/permission/i.test(st.lastResult || '')) this.setErr('Allow location for StoreKart (Precise) to share your live location.');
+    this.refreshBar();
+  },
   stop() {
+    if (Native) { try { Native.stopTracking(); } catch {} clearInterval(this.nativePoll); this.nativePoll = null; }
     if (this.watch != null) navigator.geolocation.clearWatch(this.watch);
     this.watch = null; clearInterval(this.sim); this.sim = null; clearInterval(this.beat); clearTimeout(this.pending); this.status = 'off'; this.out = [];
     try { this.wake && this.wake.release(); } catch {} this.wake = null;
@@ -873,6 +893,8 @@ const Tracker = {
     this.refreshBar();
   },
 };
+window.__skAppResumed = () => { if (S.me && S.me.role === 'delivery') Tracker.sync(); };
+window.__skTrackingDenied = () => Tracker.setErr('Location permission denied — tap Fix to allow it.');
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Tracker.watch != null) Tracker.keepAwake(); });
 
 async function renderDeliveries(quiet) {
@@ -886,7 +908,7 @@ async function renderDeliveries(quiet) {
     <div class="stats" style="grid-template-columns:repeat(3,1fr)"><div class="stat"><div class="k">To deliver</div><div class="v">${mine.length}</div></div><div class="stat"><div class="k">Delivered today</div><div class="v">${done.length}</div></div><div class="stat"><div class="k">Cash collected</div><div class="v">${rupee(cash)}</div></div></div>
     ${mine.length ? `<div class="olist">${mine.map(deliveryCard).join('')}</div>` : `<div class="empty"><div class="big">🛵</div>No deliveries assigned right now.<br>You'll hear a beep when the manager gives you one.</div>`}
     ${done.length ? `<h3 style="margin-top:24px">Done today</h3><div class="card">${done.map(o => `<div class="line"><div class="thumb">✅</div><div style="flex:1"><b>#${o.number} · ${esc(o.customer.name)}</b><div class="small muted">${esc(o.customer.address)}</div></div><div style="text-align:right"><b>${rupee(o.total)}</b><div class="small muted">${o.payment === 'cod' ? 'Cash' : 'UPI'}</div></div></div>`).join('')}</div>` : ''}
-    <p class="small muted" style="margin-top:20px">Keep this page open while delivering — your phone shares its location only while the page is on screen. Use the Navigate button for Google Maps directions, then come back here to mark delivered.</p>`);
+    <p class="small muted" style="margin-top:20px">${Native ? 'The StoreKart app keeps sharing your location even with the screen off or while you use Google Maps. Come back here to mark the order delivered.' : 'Keep this page open while delivering — your phone shares its location only while the page is on screen. Tip: install the StoreKart Android app so tracking also works with the screen off.'}</p>`);
   if (quiet && $('.olist') && document.activeElement && document.activeElement.type === 'checkbox') return; // don't wipe a ticked box
   app().innerHTML = html;
   if (!pollTimer) pollTimer = setInterval(() => { if (location.hash.startsWith('#/admin/deliveries')) { renderDeliveries(true).catch(() => {}); Tracker.sync(); } }, Api.demo ? 4000 : 30000);
@@ -955,7 +977,9 @@ function renderMe() {
       <label class="f"><span>Current</span><input type="password" id="pw-cur" autocomplete="current-password"></label>
       <label class="f"><span>New</span><input type="password" id="pw-new" autocomplete="new-password"></label>
       <button class="btn" data-act="changePw">Change password</button></div>
-    ${'Notification' in window && Notification.permission !== 'granted' ? `<button class="btn block" style="margin-top:12px" data-act="askNotify">🔔 Turn on order alerts</button>` : ''}
+    ${Native ? `<div class="card stack" style="margin-top:12px"><h3>📱 This phone</h3><div class="small muted">StoreKart app ${esc(Native.version())}</div>
+      <button class="btn block" data-act="openGpsTest">📍 GPS & phone test</button><button class="btn block" data-act="changeStore">🔗 Change store address</button></div>`
+      : ('Notification' in window && Notification.permission !== 'granted' ? `<button class="btn block" style="margin-top:12px" data-act="askNotify">🔔 Turn on order alerts</button>` : '')}
     <button class="btn block lg" style="margin-top:12px" data-act="logout">Log out</button>
   </div>`);
 }
@@ -971,7 +995,7 @@ function printBill(o) {
     ${o.tax ? `<tr><td>GST</td><td style="text-align:right">${o.tax.toFixed(2)}</td></tr>` : ''}
     <tr><td><b>TOTAL</b></td><td style="text-align:right"><b>₹${o.total.toFixed(2)}</b></td></tr></table><hr>
     <div class="c">${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${o.paid ? 'PAID' : 'UNPAID'}<br>Thank you! Visit again 🙏</div>`;
-  window.print();
+  if (Native) Native.printPage(); else window.print();
 }
 
 // ---- products admin ----
@@ -1262,13 +1286,22 @@ const actions = Object.assign({}, wizActions, {
   async delStaff(el) { if (!confirm('Remove this staff member?')) return; try { await Api.del('/api/users/' + el.dataset.id); closeModal(); renderStaff(); } catch (e) { toast(e.message, 'bad'); } },
   async staffActive(el) { try { await Api.put('/api/users/' + el.dataset.id, { active: el.checked }); toast(el.checked ? 'Account switched on' : 'Account switched off — they are logged out'); } catch (e) { toast(e.message, 'bad'); el.checked = !el.checked; } },
   async useMyLocation(el) {
-    if (!navigator.geolocation) return toast('Location not available on this device', 'bad');
     el.disabled = true; el.textContent = 'Finding you…';
+    if (Native) {
+      window.__skLoc = (lat, lng, acc, err) => {
+        if (lat == null) { el.disabled = false; el.textContent = '📍 Use my current location'; return toast(err || 'Could not get your location', 'bad'); }
+        S.form = S.form || {}; S.form.geo = { lat, lng }; S.drawCheckout(); toast('Location added — the delivery boy will navigate straight to you', 'ok');
+      };
+      return Native.getLocation('__skLoc');
+    }
+    if (!navigator.geolocation) { el.disabled = false; return toast('Location not available on this device', 'bad'); }
     navigator.geolocation.getCurrentPosition(p => {
       S.form = S.form || {}; S.form.geo = { lat: p.coords.latitude, lng: p.coords.longitude };
       S.drawCheckout(); toast('Location added — the delivery boy will navigate straight to you', 'ok');
     }, err => { el.disabled = false; el.textContent = '📍 Use my current location'; toast(err.code === 1 ? 'Location permission was denied' : 'Could not get your location', 'bad'); }, { enableHighAccuracy: true, timeout: 15000 });
   },
+  openGpsTest() { if (Native) Native.openGpsTest(); },
+  changeStore() { if (Native) Native.changeStore(); },
   clearGeo() { S.form.geo = null; S.drawCheckout(); },
   ofilter(el) { S.orderFilter = el.dataset.f; renderAdminOrders(); },
   refreshOrders() { renderAdminOrders(); },

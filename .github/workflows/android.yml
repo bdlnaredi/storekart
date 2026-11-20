@@ -1,0 +1,39 @@
+name: Build Android app
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk ../StoreKart.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StoreKart-apk
+          path: StoreKart.apk
+      # Easy phone download: Releases → "StoreKart Android (latest)" → StoreKart.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: StoreKart Android (latest)
+          prerelease: true
+          make_latest: false
+          files: StoreKart.apk
+          body: |
+            Latest Android test build (run ${{ github.run_number }}).
+            Open this page on your phone, tap StoreKart.apk and install. Allow "Install unknown apps" for Chrome when asked.
