@@ -804,6 +804,7 @@ function staffTabs() {
   if (can('pack')) t.push(['counter', 'Counter']);
   if (S.me && S.me.role === 'delivery') t.push(['deliveries', 'My deliveries']);
   if (can('products')) t.push(['products', L('products') === 'Menu' ? 'Menu' : 'Products']);
+  t.push(['cash', 'Cash']);
   if (can('staff')) t.push(['staff', 'Staff']);
   if (can('settings')) t.push(['settings', 'Settings']);
   t.push(['me', '👤']);
@@ -848,6 +849,7 @@ async function renderAdmin(tab, rest) {
     else if (tab === 'settings') renderSettings();
     else if (tab === 'me') renderMe();
     else if (tab === 'counter') renderCounter();
+    else if (tab === 'cash') await renderCash();
     connectEvents();
     Tracker.sync();
   } catch (e) {
@@ -859,7 +861,7 @@ function logout() { ls.del('sk_token'); ls.del('sk_user'); S.me = null; S.orders
 function connectEvents() {
   if (Api.demo || events) return;
   events = new EventSource('api/events?token=' + encodeURIComponent(ls.get('sk_token')));
-  for (const ev of ['order', 'update', 'assigned']) events.addEventListener(ev, e => onStaffEvent(ev, JSON.parse(e.data)));
+  for (const ev of ['order', 'update', 'assigned', 'cash']) events.addEventListener(ev, e => onStaffEvent(ev, JSON.parse(e.data)));
   events.onerror = () => { events.close(); events = null; setTimeout(() => location.hash.startsWith('#/admin') && S.me && connectEvents(), 8000); };
 }
 function beep(times = 3) {
@@ -878,6 +880,14 @@ function alertStaff(title, body) {
 function onStaffEvent(ev, d) {
   if (!S.me || !location.hash.startsWith('#/admin')) return;
   const r = S.me.role;
+  if (ev === 'cash') {
+    if (d.toId !== S.me.id) return;
+    if (d.kind === 'new') alertStaff(`${d.from} handed you ${rupee(d.amount)} cash — please confirm`, 'Open the Cash tab');
+    else if (d.kind === 'accepted') toast(`✓ ${d.from} confirmed ${rupee(d.amount)}${d.short ? ` (₹${d.short} short)` : ''}`, d.short ? 'bad' : 'ok');
+    else if (d.kind === 'rejected') alertStaff(`${d.from} says the cash was NOT received`, 'Open the Cash tab');
+    if (location.hash.startsWith('#/admin/cash')) renderCash().catch(() => {});
+    return;
+  }
   const where = d.channel === 'kiosk' ? ' (in-store screen)' : '';
   if (ev === 'order' && d.channel !== 'counter' && ['admin', 'owner', 'manager'].includes(r)) alertStaff(`New order #${d.number}${where} — ${rupee(d.total)}`, d.name || '');
   if (ev === 'order' && d.channel === 'kiosk' && d.status === 'accepted' && r === 'cashier') alertStaff(`New order #${d.number}${where} — please pack it`, d.name || '');
@@ -1057,7 +1067,7 @@ async function renderDeliveries(quiet) {
   const cash = done.filter(o => o.payment === 'cod' && o.paid).reduce((s, o) => s + o.total, 0);
   const html = adminShell('deliveries', `
     <div class="row" style="margin:16px 0 8px"><h2 style="margin:0">Hi ${esc(S.me.name)} 👋</h2><span class="spacer"></span><button class="btn sm" data-act="refreshDeliveries">↻</button></div>
-    <div class="stats" style="grid-template-columns:repeat(3,1fr)"><div class="stat"><div class="k">To deliver</div><div class="v">${mine.length}</div></div><div class="stat"><div class="k">Delivered today</div><div class="v">${done.length}</div></div><div class="stat"><div class="k">Cash collected</div><div class="v">${rupee(cash)}</div></div></div>
+    <div class="stats" style="grid-template-columns:repeat(3,1fr)"><div class="stat"><div class="k">To deliver</div><div class="v">${mine.length}</div></div><div class="stat"><div class="k">Delivered today</div><div class="v">${done.length}</div></div><div class="stat"><div class="k">Cash collected</div><div class="v">${rupee(cash)}</div><a class="small" href="#/admin/cash">Hand over cash →</a></div></div>
     ${mine.length ? `<div class="olist">${mine.map(deliveryCard).join('')}</div>` : `<div class="empty"><div class="big">🛵</div>No deliveries assigned right now.<br>You'll hear a beep when the manager gives you one.</div>`}
     ${done.length ? `<h3 style="margin-top:24px">Done today</h3><div class="card">${done.map(o => `<div class="line"><div class="thumb">✅</div><div style="flex:1"><b>#${o.number} · ${esc(o.customer.name)}</b><div class="small muted">${esc(o.customer.address)}</div></div><div style="text-align:right"><b>${rupee(o.total)}</b><div class="small muted">${o.payment === 'cod' ? 'Cash' : 'UPI'}</div></div></div>`).join('')}</div>` : ''}
     <p class="small muted" style="margin-top:20px">${Native ? 'The StoreKart app keeps sharing your location even with the screen off or while you use Google Maps. Come back here to mark the order delivered.' : 'Keep this page open while delivering — your phone shares its location only while the page is on screen. Tip: install the StoreKart Android app so tracking also works with the screen off.'}</p>`);
@@ -1427,6 +1437,60 @@ async function saveSettings(btn) {
   btn.disabled = false;
 }
 
+// ================= cash handover (#/admin/cash) =================
+// Everyone who collects cash hands it up the chain; the person receiving confirms it.
+const roleShort = r => ({ admin: 'Admin', owner: 'Owner', manager: 'Manager', cashier: 'Cashier', delivery: 'Delivery boy', bank: 'Bank' }[r] || r);
+async function renderCash() {
+  const d = await Api.get('/api/cash');
+  S.cash = d;
+  const canGive = d.recipients.length > 0;
+  const statusPill = h => h.status === 'pending' ? '<span class="pill warn">Waiting for confirmation</span>'
+    : h.status === 'accepted' ? `<span class="pill ok">Confirmed${h.short ? ` · ₹${h.short} short` : ''}</span>`
+    : h.status === 'rejected' ? '<span class="pill bad">Not received</span>' : '<span class="pill">Cancelled</span>';
+  const row = h => {
+    const out = h.from.id === S.me.id;
+    const other = out ? h.to : h.from;
+    return `<div class="cash-row"><div class="avatar">${out ? (h.to.id === 'bank' ? '🏦' : '⬆️') : '⬇️'}</div>
+      <div style="flex:1;min-width:0"><b>${out ? (h.to.id === 'bank' ? 'Deposited in bank' : `To ${esc(other.name)}`) : `From ${esc(other.name)}`}</b> <span class="small muted">${esc(roleShort(other.role))}</span>
+        <div class="small muted">${fmtTime(h.createdAt)}${h.note ? ` · “${esc(h.note)}”` : ''}</div>
+        <div style="margin-top:4px">${statusPill(h)}${h.decisionNote ? ` <span class="small muted">“${esc(h.decisionNote)}”</span>` : ''}</div></div>
+      <div style="text-align:right"><b>${rupee(h.received != null ? h.received : h.amount)}</b>${h.received != null && h.received !== h.amount ? `<div class="small muted">of ${rupee(h.amount)}</div>` : ''}
+        ${out && h.status === 'pending' ? `<div><button class="btn sm ghost danger" data-act="cashCancel" data-id="${h.id}">Cancel</button></div>` : ''}</div></div>`;
+  };
+  app().innerHTML = adminShell('cash', `<div class="narrow" style="max-width:900px;padding:16px 0">
+    <h2>💵 Cash</h2>
+    <div class="stats" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat"><div class="k">In my hand</div><div class="v">${rupee(d.inHand)}</div></div>
+      <div class="stat"><div class="k">Waiting to be confirmed</div><div class="v">${rupee(d.pendingOut)}</div></div>
+      <div class="stat"><div class="k">Collected today</div><div class="v">${rupee(d.collectedToday)}</div></div>
+    </div>
+    ${d.incoming.length ? `<div class="card stack cash-in"><h3>🔔 Please confirm — did you receive this cash?</h3>${d.incoming.map(h => `<div class="cash-confirm">
+        <div><b>${esc(h.from.name)}</b> <span class="small muted">${esc(roleShort(h.from.role))}</span> gave you <b class="big-amt">${rupee(h.amount)}</b>
+        <div class="small muted">${fmtTime(h.createdAt)}${h.note ? ` · “${esc(h.note)}”` : ''}</div></div>
+        <div class="row wrap" style="gap:8px;margin-top:8px"><button class="btn primary" data-act="cashAccept" data-id="${h.id}">✓ Yes, got ${rupee(h.amount)}</button>
+          <button class="btn" data-act="cashDiff" data-id="${h.id}">Got a different amount</button>
+          <button class="btn danger" data-act="cashReject" data-id="${h.id}">✗ Not received</button></div></div>`).join('')}</div>` : ''}
+    ${canGive ? `<div class="card stack" style="margin-top:12px"><h3>Hand over cash</h3>
+      ${d.available > 0 ? `<div class="grid3">
+        <label class="f"><span>Give to</span><select id="cash-to">${d.recipients.map(u => `<option value="${u.id}">${esc(u.name)} — ${esc(roleShort(u.role))}</option>`).join('')}</select></label>
+        <label class="f"><span>Amount (₹)</span><input type="number" id="cash-amt" value="${d.available}" min="1" max="${d.available}" inputmode="decimal"></label>
+        <label class="f"><span>Note (optional)</span><input type="text" id="cash-note" placeholder="e.g. evening collection"></label></div>
+        <button class="btn primary lg" data-act="cashGive">Hand over cash</button>
+        <div class="small muted">They will be asked to confirm. Until they do, the cash still counts as yours.</div>`
+      : `<div class="muted">${d.pendingOut ? 'All your cash is waiting to be confirmed.' : 'You have no cash to hand over right now.'}</div>`}</div>` : ''}
+    ${d.team ? `<div class="card stack" style="margin-top:12px"><h3>👥 Team cash</h3>
+      <table class="ptable"><thead><tr><th>Name</th><th>Role</th><th>In hand</th><th>Waiting</th><th>Collected today</th></tr></thead><tbody>
+      ${d.team.filter(t => t.inHand || t.pendingOut || t.collectedToday || ['owner', 'admin'].includes(t.user.role)).map(t => `<tr><td><b>${esc(t.user.name)}</b>${t.user.id === S.me.id ? ' <span class="pill">you</span>' : ''}</td><td class="small">${esc(roleShort(t.user.role))}</td><td><b>${rupee(t.inHand)}</b></td><td>${t.pendingOut ? rupee(t.pendingOut) : '—'}</td><td>${rupee(t.collectedToday)}</td></tr>`).join('')}
+      <tr><td colspan="2"><b>Total cash with team</b></td><td><b>${rupee(d.team.reduce((s, t) => s + t.inHand, 0))}</b></td><td colspan="2"></td></tr></tbody></table>
+      <div class="row wrap" style="gap:8px;align-items:flex-end"><label class="f" style="flex:1;min-width:140px"><span>Bank deposit (₹)</span><input type="number" id="dep-amt" min="1" placeholder="Amount"></label>
+        <label class="f" style="flex:2;min-width:180px"><span>Note</span><input type="text" id="dep-note" placeholder="e.g. SBI, slip no."></label>
+        <button class="btn" data-act="cashDeposit">🏦 Record deposit</button></div></div>` : ''}
+    <div class="card" style="margin-top:12px"><h3>History</h3>${d.history.length ? d.history.map(row).join('') : '<div class="muted small">No handovers yet.</div>'}</div>
+    ${d.orders.length ? `<div class="card" style="margin-top:12px"><h3>Cash orders I collected</h3>${d.orders.map(o => `<div class="cash-row"><div class="avatar">🧾</div><div style="flex:1"><b>#${o.number}</b> <span class="small muted">${esc(o.customer)} · ${esc(MODE_NAMES()[o.mode] || '')}</span><div class="small muted">${fmtTime(o.at)}</div></div><b>${rupee(o.total)}</b></div>`).join('')}</div>` : ''}
+  </div>`);
+  if (!pollTimer) pollTimer = setInterval(() => { if (location.hash.startsWith('#/admin/cash') && !$('#modal-root').innerHTML) renderCash().catch(() => {}); }, Api.demo ? 4000 : 30000);
+}
+
 // ================= in-store self-order screen (#/kiosk) =================
 // A tablet or touch screen in the shop. Customers order and pay by themselves; staff see the order instantly.
 const K = { step: 'welcome', mode: 'dinein', cart: [], cat: null, name: '', table: '', pay: null, done: null, idle: null, taps: 0 };
@@ -1630,6 +1694,41 @@ const actions = Object.assign({}, wizActions, {
     const old = document.title; document.title = `Invoice ${invoiceNo(o).replace('/', '-')} - ${S.cfg.name}`;
     if (Native) Native.printPage(); else window.print();
     setTimeout(() => { document.title = old; }, 1000);
+  },
+  // ---- cash handover ----
+  async cashGive(el) {
+    const to = $('#cash-to'), amt = +$('#cash-amt').value;
+    if (!(amt > 0)) return toast('Enter the amount', 'bad');
+    const name = to.options[to.selectedIndex].text.split(' — ')[0];
+    if (!confirm(`Hand over ${rupee(amt)} to ${name}?`)) return;
+    el.disabled = true;
+    try { await Api.post('/api/cash/handover', { to: to.value, amount: amt, note: $('#cash-note').value }); toast(`Sent — waiting for ${name} to confirm`, 'ok'); renderCash(); }
+    catch (e) { toast(e.message, 'bad'); el.disabled = false; }
+  },
+  async cashAccept(el) { try { await Api.post(`/api/cash/handover/${el.dataset.id}/accept`, {}); toast('Confirmed — added to your cash', 'ok'); renderCash(); } catch (e) { toast(e.message, 'bad'); } },
+  cashDiff(el) {
+    const h = S.cash.incoming.find(x => x.id === el.dataset.id);
+    openModal(`<div class="sheet" data-stop><div class="sheet-body stack"><h2>How much did you get?</h2><div class="muted">${esc(h.from.name)} says ${rupee(h.amount)}.</div>
+      <label class="f"><span>Amount actually received (₹)</span><input type="number" id="cd-amt" max="${h.amount}" min="1" inputmode="decimal"></label>
+      <label class="f"><span>Note</span><input type="text" id="cd-note" placeholder="e.g. ₹100 short"></label>
+      <div class="row"><button class="btn" data-act="closeModal">Cancel</button><span class="spacer"></span><button class="btn primary" data-act="cashDiffSave" data-id="${h.id}">Confirm this amount</button></div></div></div>`);
+    $('#cd-amt').focus();
+  },
+  async cashDiffSave(el) {
+    try { const r = await Api.post(`/api/cash/handover/${el.dataset.id}/accept`, { amount: $('#cd-amt').value, note: $('#cd-note').value }); closeModal(); toast(r.short ? `Confirmed ${rupee(r.received)} — ₹${r.short} short stays with them` : 'Confirmed', 'ok'); renderCash(); }
+    catch (e) { toast(e.message, 'bad'); }
+  },
+  cashReject(el) {
+    openModal(`<div class="sheet" data-stop><div class="sheet-body stack"><h2>Cash not received</h2>
+      <label class="f"><span>Reason *</span><input type="text" id="cr-note" placeholder="e.g. not given yet / wrong person"></label>
+      <div class="row"><button class="btn" data-act="closeModal">Cancel</button><span class="spacer"></span><button class="btn danger" data-act="cashRejectSave" data-id="${el.dataset.id}">Mark not received</button></div></div></div>`);
+    $('#cr-note').focus();
+  },
+  async cashRejectSave(el) { try { await Api.post(`/api/cash/handover/${el.dataset.id}/reject`, { note: $('#cr-note').value }); closeModal(); toast('Marked as not received — the cash stays with them'); renderCash(); } catch (e) { toast(e.message, 'bad'); } },
+  async cashCancel(el) { if (!confirm('Cancel this handover?')) return; try { await Api.post(`/api/cash/handover/${el.dataset.id}/cancel`, {}); renderCash(); } catch (e) { toast(e.message, 'bad'); } },
+  async cashDeposit() {
+    const amt = +$('#dep-amt').value; if (!(amt > 0)) return toast('Enter the deposit amount', 'bad');
+    try { await Api.post('/api/cash/deposit', { amount: amt, note: $('#dep-note').value }); toast('Bank deposit recorded', 'ok'); renderCash(); } catch (e) { toast(e.message, 'bad'); }
   },
   // ---- self-order screen ----
   kioskMode(el) { K.mode = el.dataset.m; K.step = 'menu'; renderKiosk(); },

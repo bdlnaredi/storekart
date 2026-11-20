@@ -27,6 +27,12 @@ const CAN = {
   pack:     ['admin', 'owner', 'manager', 'cashier'], // packing / ready / hand over for pickup & dine-in
   payment:  ['admin', 'owner', 'manager', 'cashier'],
 };
+// cash handover: who each role can give collected cash to (owner/admin receive; they record bank deposits)
+const CASH_TO = {
+  delivery: ['cashier', 'manager', 'owner', 'admin'],
+  cashier:  ['manager', 'owner', 'admin'],
+  manager:  ['owner', 'admin'],
+};
 const can = (user, perm) => !!user && (CAN[perm] || []).includes(user.role);
 
 // ---------------- helpers ----------------
@@ -319,12 +325,12 @@ function createCore(env) {
     if (p === '/api/reset' && m === 'POST') {
       need('reset');
       if (!checkPw(user, b.password)) fail(401, 'Wrong password.');
-      D.config = null; D.users = []; D.products = []; D.orders = []; D.orderSeq = 1000;
+      D.config = null; D.users = []; D.products = []; D.orders = []; D.handovers = []; D.orderSeq = 1000;
       env.save(true); return { ok: true };
     }
     if (p === '/api/export' && m === 'GET') {
       need('export');
-      return { config: D.config, products: D.products, orders: D.orders, users: D.users.map(publicUser), exportedAt: nowIso() };
+      return { config: D.config, products: D.products, orders: D.orders, handovers: D.handovers || [], users: D.users.map(publicUser), exportedAt: nowIso() };
     }
 
     // ----- products -----
@@ -387,6 +393,7 @@ function createCore(env) {
       }
       if (channel === 'counter' && b.paid === true) {
         o.paid = true;
+        if (payment === 'cod') { o.collectedBy = by(user); o.collectedAt = at; }
         const cash = payment === 'cod' && num(b.cashGiven) > 0 ? ` (cash ₹${money(b.cashGiven)}, change ₹${money(num(b.cashGiven) - o.total)})` : '';
         o.history.push({ at, text: `Payment of ₹${rs(o.total)} received${payment === 'upi' ? ' by UPI' : ' in cash'}${cash} — by ${who(user)}`, pub: `Payment of ₹${rs(o.total)} received${payment === 'upi' ? ' by UPI' : ' in cash'}`, by: by(user) });
       }
@@ -448,6 +455,7 @@ function createCore(env) {
         if (typeof b.paid === 'boolean' && b.paid !== o.paid) {
           if (!can(user, 'payment') && !isRiderOf(user, o)) fail(403, "Your role can't change payment.");
           o.paid = b.paid;
+          if (o.payment === 'cod') { o.collectedBy = b.paid ? by(user) : null; o.collectedAt = b.paid ? nowIso() : null; }
           const how = o.payment === 'upi' ? ' by UPI' : ' in cash';
           log(o, user, { text: b.paid ? `Payment of ₹${rs(o.total)} received${how} — by ${who(user)}` : `Payment marked unpaid — by ${who(user)}`,
             pub: b.paid ? `Payment of ₹${rs(o.total)} received${how}` : 'Payment is still due' });
@@ -458,11 +466,105 @@ function createCore(env) {
         return o;
       }
     }
+    // ----- cash handover between staff -----
+    if (p === '/api/cash' && m === 'GET') {
+      need();
+      const me = cashSummary(user.id);
+      const H = D.handovers || [];
+      const mine = H.filter(h => h.from.id === user.id || h.to.id === user.id).slice(0, 100);
+      const out = {
+        role: user.role, ...me,
+        orders: me.orders.slice(0, 60).map(o => ({ id: o.id, number: o.number, total: o.total, at: o.collectedAt || o.updatedAt, customer: o.customer.name, mode: o.mode })),
+        recipients: (CASH_TO[user.role] || []).length ? D.users.filter(u => u.active !== false && u.id !== user.id && CASH_TO[user.role].includes(u.role)).map(publicUser) : [],
+        incoming: mine.filter(h => h.to.id === user.id && h.status === 'pending'),
+        history: mine,
+      };
+      if (can(user, 'reports')) {
+        out.team = D.users.filter(u => u.active !== false).map(u => Object.assign({ user: publicUser(u) }, (({ inHand, pendingOut, collectedToday }) => ({ inHand, pendingOut, collectedToday }))(cashSummary(u.id))));
+        out.deposits = H.filter(h => h.to.id === 'bank').slice(0, 30);
+      }
+      return out;
+    }
+    if (p === '/api/cash/handover' && m === 'POST') {
+      need();
+      const allowed = CASH_TO[user.role] || [];
+      if (!allowed.length) fail(403, 'Your role receives cash; it does not hand it over.');
+      const to = D.users.find(u => u.id === b.to && u.active !== false);
+      if (!to || !allowed.includes(to.role)) fail(400, 'Choose who you are giving the cash to.');
+      const amount = money(b.amount);
+      if (!(amount > 0)) fail(400, 'Enter the amount you are handing over.');
+      const me = cashSummary(user.id);
+      if (amount > me.available + 0.001) fail(400, `You only have ₹${rs(me.available)} to hand over${me.pendingOut ? ` (₹${rs(me.pendingOut)} is already waiting for confirmation)` : ''}.`);
+      const h = { id: env.id(), from: by(user), to: by(to), amount, note: str(b.note, 200), status: 'pending', createdAt: nowIso() };
+      D.handovers = D.handovers || []; D.handovers.unshift(h); env.save();
+      env.emit('cash', { kind: 'new', toId: to.id, fromId: user.id, from: user.name, amount });
+      return h;
+    }
+    if (p === '/api/cash/deposit' && m === 'POST') { // owner / admin: cash taken to the bank
+      need('reports');
+      const amount = money(b.amount);
+      const me = cashSummary(user.id);
+      if (!(amount > 0)) fail(400, 'Enter the amount deposited.');
+      if (amount > me.inHand + 0.001) fail(400, `You have ₹${rs(me.inHand)} in hand.`);
+      const h = { id: env.id(), from: by(user), to: { id: 'bank', name: 'Bank deposit', role: 'bank' }, amount, received: amount, note: str(b.note, 200), status: 'accepted', createdAt: nowIso(), decidedAt: nowIso() };
+      D.handovers = D.handovers || []; D.handovers.unshift(h); env.save();
+      return h;
+    }
+    if ((mm = p.match(/^\/api\/cash\/handover\/([\w-]+)\/(accept|reject|cancel)$/)) && m === 'POST') {
+      need();
+      const h = (D.handovers || []).find(x => x.id === mm[1]);
+      if (!h) fail(404, 'Not found');
+      if (h.status !== 'pending') fail(409, 'This handover is already ' + h.status + '.');
+      const act = mm[2];
+      if (act === 'cancel') { if (h.from.id !== user.id) fail(403, 'Only the person who submitted it can cancel.'); h.status = 'cancelled'; }
+      else {
+        if (h.to.id !== user.id) fail(403, 'Only the person receiving the cash can confirm it.');
+        if (act === 'accept') {
+          const got = b.amount == null || b.amount === '' ? h.amount : money(b.amount);
+          if (!(got > 0) || got > h.amount) fail(400, `Enter an amount between ₹1 and ₹${rs(h.amount)}.`);
+          h.status = 'accepted'; h.received = got;
+          if (got < h.amount) h.short = money(h.amount - got);
+        } else {
+          if (!str(b.note)) fail(400, 'Please write why (e.g. “cash not given yet”).');
+          h.status = 'rejected';
+        }
+        h.decisionNote = str(b.note, 200);
+      }
+      h.decidedAt = nowIso(); env.save();
+      env.emit('cash', { kind: h.status, toId: h.from.id, fromId: user.id, from: user.name, amount: h.received || h.amount, short: h.short || 0 });
+      return h;
+    }
+
     fail(404, 'Not found');
+  }
+
+  // who physically holds the cash for a cash order (older orders: whoever logged the cash payment)
+  function cashCollector(o) {
+    if (o.payment !== 'cod' || !o.paid || o.status === 'cancelled') return null;
+    if (o.collectedBy) return o.collectedBy;
+    for (let i = o.history.length - 1; i >= 0; i--) { const h = o.history[i]; if (h.by && /^Payment of .* received/.test(h.text) && !/UPI/.test(h.text)) return h.by; }
+    return null;
+  }
+  // cash in hand = cash collected + cash received from others − cash handed over (only confirmed handovers count)
+  function cashSummary(uid) {
+    const D = db(), H = D.handovers || [];
+    const today = new Date().toDateString();
+    let collected = 0, collectedToday = 0; const orders = [];
+    for (const o of D.orders) {
+      const c = cashCollector(o);
+      if (c && c.id === uid) { collected += o.total; orders.push(o); if (new Date(o.collectedAt || o.updatedAt).toDateString() === today) collectedToday += o.total; }
+    }
+    const amt = h => h.received != null ? h.received : h.amount;
+    const inAcc = H.filter(h => h.to.id === uid && h.status === 'accepted').reduce((s, h) => s + amt(h), 0);
+    const outAcc = H.filter(h => h.from.id === uid && h.status === 'accepted').reduce((s, h) => s + amt(h), 0);
+    const pendingOut = H.filter(h => h.from.id === uid && h.status === 'pending').reduce((s, h) => s + h.amount, 0);
+    const pendingIn = H.filter(h => h.to.id === uid && h.status === 'pending').reduce((s, h) => s + h.amount, 0);
+    const inHand = money(collected + inAcc - outAcc);
+    return { inHand, pendingOut: money(pendingOut), pendingIn: money(pendingIn), available: money(inHand - pendingOut), collectedToday: money(collectedToday), orders };
   }
 
   return { handle, publicUser, cleanProduct };
 }
 
-return { ROLES, CAN, can, HttpError, createCore, priceCart, storeIsOpen, statusName, flowFor, distanceM };
+return { ROLES, CAN, CASH_TO, can, HttpError, createCore, priceCart, storeIsOpen, statusName, flowFor, distanceM };
 });

@@ -41,7 +41,7 @@ function loadDb() {
   let d;
   try { d = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
   catch (e) { if (e.code !== 'ENOENT') console.error('Could not read db.json, starting fresh:', e.message); d = {}; }
-  d = Object.assign({ config: null, users: [], products: [], orders: [], orderSeq: 1000 }, d);
+  d = Object.assign({ config: null, users: [], products: [], orders: [], handovers: [], orderSeq: 1000 }, d);
   if (!d.secret) d.secret = crypto.randomBytes(32).toString('hex');
   // upgrade from v1 (single admin password) to staff accounts
   if (d.admin && !d.users.length) {
@@ -81,7 +81,8 @@ function broadcast(event, data) {
   for (const l of listeners) {
     const u = env.db.users.find(x => x.id === l.userId);
     if (!u) continue;
-    if (u.role === 'delivery' && data.riderId !== u.id) continue; // delivery boys only hear about their own orders
+    if (event === 'cash') { if (data.toId !== u.id) continue; } // cash handovers: only the person who must act
+    else if (u.role === 'delivery' && data.riderId !== u.id) continue; // delivery boys only hear about their own orders
     if (event === 'location') continue; // only customers poll for the map
     l.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }

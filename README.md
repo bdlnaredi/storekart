@@ -58,6 +58,16 @@ Prices are always recalculated on the server, so nobody can change a price in th
 
   It then saves the order (already accepted) and can print the bill. The counter keeps working even when online orders are paused.
 
+## Cash handover (Staff → **Cash** tab)
+Everyone can see exactly who is holding the shop's cash:
+- **Collecting cash adds to your cash in hand.** When a delivery boy collects cash on delivery, or a cashier takes cash at the counter, it goes into that person's **cash in hand**. UPI payments go to the bank, so they don't count.
+- **Handing over:** you enter **how much** and **to whom**:
+  - delivery boy → cashier, manager or owner;
+  - cashier → manager or owner;
+  - manager → owner.
+- **Confirming:** the person receiving gets an alert and taps **✓ Yes, got ₹X**, **Got a different amount** (any shortfall stays against the giver), or **✗ Not received** with a reason. The cash only moves between people's balances once it's confirmed. Until then it shows as "waiting to be confirmed".
+- **Owner view:** the owner and admin see a **Team cash** table (each person's cash in hand, waiting and collected today) and can **record bank deposits**.
+
 ## Payments, GST & bills
 - **UPI QR codes** are made inside the app, with no internet service needed. They appear on the customer's order page, on the self-order screen and at the counter, and work with GPay, PhonePe, Paytm, BHIM and bank apps.
 - **Packing charge** is **off** by default. Switch it on and set the amount in Settings → Ordering. It's never added to dine-in orders.
