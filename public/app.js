@@ -29,87 +29,45 @@ const timeAgo = iso => {
 const fmtTime = iso => new Date(iso).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const imgOrEmoji = (p, fallback = '🛍️') => p.image ? `<img src="${esc(p.image)}" alt="" loading="lazy">` : esc(p.emoji || fallback);
 
-// ================= pricing (mirrors the server) =================
-function lineFor(item, products) {
-  const p = products.find(x => x.id === item.productId);
-  if (!p) return null;
-  let unit = p.price, variant = null;
-  if (p.variants && p.variants.length) {
-    const v = p.variants.find(v => v.name === item.variant) || p.variants[0];
-    variant = v.name; unit = v.price;
-  }
-  const addons = (item.addons || []).map(n => (p.addons || []).find(a => a.name === n)).filter(Boolean);
-  unit += addons.reduce((s, a) => s + a.price, 0);
-  unit = Math.round(unit * 100) / 100;
-  return { productId: p.id, name: p.name, image: p.image, emoji: p.emoji, variant, option2: item.option2 || null, addons, unitPrice: unit, qty: item.qty, total: Math.round(unit * item.qty * 100) / 100, note: item.note || '', product: p };
-}
-function priceCart(cfg, products, items, mode) {
-  const lines = items.map(i => lineFor(i, products)).filter(Boolean);
-  const subtotal = Math.round(lines.reduce((s, l) => s + l.total, 0) * 100) / 100;
-  const d = cfg.delivery || {};
-  let deliveryFee = 0;
-  if (mode === 'delivery') deliveryFee = d.freeAbove && subtotal >= d.freeAbove ? 0 : Number(d.fee || 0);
-  const packing = lines.length ? Number(cfg.packingCharge || 0) : 0;
-  const tax = cfg.tax && cfg.tax.enabled && !cfg.tax.inclusive ? Math.round(subtotal * cfg.tax.rate) / 100 : 0;
-  const total = Math.round((subtotal + deliveryFee + packing + tax) * 100) / 100;
-  return { lines, subtotal, deliveryFee, packing, tax, total };
-}
+// ================= pricing (shared with the server via core.js) =================
+const Core = window.StoreCore;
+const priceCart = (cfg, products, items, mode) => Core.priceCart(cfg, products, items, mode, false);
+const lineFor = (item, products) => priceCart(S.cfg, products, [item], null).lines[0];
+const roleLabel = r => (Core.ROLES[r] || {}).label || r;
+const can = perm => Core.can(S.me, perm);
 
-// ================= API (real server, or a demo backend in the browser) =================
-const DemoBackend = {
+// ================= API (real server, or the same store rules running in this browser) =================
+const DEMO_KEY = 'sk_demo_v2';
+const Demo = {
   // Used when no StoreKart server is reachable (e.g. the hosted preview). Everything lives in this browser.
-  key: 'sk_demo_db',
-  load() { return ls.get(this.key, null) || this.mem || { config: null, password: null, products: [], orders: [], seq: 1000 }; },
-  save(db) { this.mem = db; ls.set(this.key, db); },
-  isOpen(c) {
-    if (!c.acceptingOrders) return false;
-    const h = c.hours; if (!h || !h.enabled) return true;
-    const n = new Date(), m = n.getHours() * 60 + n.getMinutes();
-    const [a, b] = h.open.split(':').map(Number), [x, y] = h.close.split(':').map(Number);
-    const o = a * 60 + b, cl = x * 60 + y;
-    return o <= cl ? m >= o && m <= cl : m >= o || m <= cl;
+  env: null, core: null,
+  init() {
+    const blank = { config: null, users: [], products: [], orders: [], orderSeq: 1000 };
+    this.env = {
+      db: ls.get(DEMO_KEY, null) || blank,
+      save: () => ls.set(DEMO_KEY, this.env.db),
+      // demo only — not a secure hash; the real server uses scrypt
+      hash(pw, salt = Math.random().toString(36).slice(2, 10)) { let h = 5381; for (const ch of salt + pw) h = ((h << 5) + h + ch.charCodeAt(0)) >>> 0; return { salt, hash: h.toString(16) }; },
+      id: uid,
+      makeToken: u => 'demo.' + u.id + '.' + u.salt.slice(0, 8),
+      saveUpload: dataUrl => dataUrl,
+      emit: (ev, data) => setTimeout(() => onStaffEvent(ev, data), 50),
+    };
+    this.core = Core.createCore(this.env);
+    window.addEventListener('storage', e => { if (e.key === DEMO_KEY) { this.env.db = ls.get(DEMO_KEY, this.env.db); onStaffEvent('sync', {}); } });
   },
-  async call(method, path, body) {
-    const db = this.load();
-    const err = (status, msg) => { const e = new Error(msg); e.status = status; throw e; };
-    const authed = () => { if (ls.get('sk_token') !== 'demo-token') err(401, 'Please log in again.'); };
-    let m;
-    if (path === '/api/config' && method === 'GET') return db.config ? Object.assign({ configured: true, isOpen: this.isOpen(db.config) }, db.config) : { configured: false };
-    if (path === '/api/setup') { db.config = Object.assign({ acceptingOrders: true }, body.config); db.password = body.password; db.products = body.products.map(p => Object.assign({ id: uid(), variants: [], addons: [], options2: [], tags: [], inStock: true, stock: null }, p)); this.save(db); return { token: 'demo-token' }; }
-    if (path === '/api/login') { if (body.password !== db.password) err(401, 'Wrong password.'); return { token: 'demo-token' }; }
-    if (path === '/api/config' && method === 'PUT') { authed(); db.config = Object.assign({}, db.config, body); this.save(db); return db.config; }
-    if (path === '/api/password') { authed(); if (body.current !== db.password) err(401, 'Current password is wrong.'); db.password = body.next; this.save(db); return { token: 'demo-token' }; }
-    if (path === '/api/reset') { authed(); if (body.password !== db.password) err(401, 'Wrong password.'); this.save({ config: null, password: null, products: [], orders: [], seq: 1000 }); return { ok: true }; }
-    if (path === '/api/products' && method === 'GET') return db.products.slice().sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name));
-    if (path === '/api/products' && method === 'POST') { authed(); const p = Object.assign({}, body, { id: uid() }); db.products.push(p); this.save(db); return p; }
-    if ((m = path.match(/^\/api\/products\/(\w+)$/))) {
-      authed(); const i = db.products.findIndex(p => p.id === m[1]); if (i < 0) err(404, 'Not found');
-      if (method === 'PUT') { db.products[i] = Object.assign({}, body, { id: m[1] }); this.save(db); return db.products[i]; }
-      if (method === 'DELETE') { db.products.splice(i, 1); this.save(db); return { ok: true }; }
-    }
-    if (path === '/api/upload') { authed(); return { url: body.dataUrl }; }
-    if (path === '/api/orders' && method === 'POST') {
-      if (!this.isOpen(db.config)) err(409, 'Sorry, the store is closed right now.');
-      const pr = priceCart(db.config, db.products, body.items, body.mode);
-      if (!pr.lines.length) err(400, 'Your cart is empty.');
-      const d = db.config.delivery || {};
-      if (body.mode === 'delivery' && d.minOrder && pr.subtotal < d.minOrder) err(400, `Minimum order for delivery is ₹${d.minOrder}.`);
-      const now = new Date().toISOString();
-      const o = Object.assign({ id: uid(), number: ++db.seq, createdAt: now, status: 'new', history: [{ status: 'new', at: now }] }, body, pr, { lines: pr.lines.map(({ product, ...l }) => l) });
-      delete o.items; db.orders.unshift(o); this.save(db);
-      return { id: o.id, number: o.number, total: o.total };
-    }
-    if (path === '/api/orders' && method === 'GET') { authed(); return db.orders; }
-    if ((m = path.match(/^\/api\/orders\/(\w+)$/))) {
-      const o = db.orders.find(x => x.id === m[1]); if (!o) err(404, 'Order not found');
-      if (method === 'GET') return o;
-      authed();
-      if (body.status && body.status !== o.status) { o.status = body.status; o.history.push({ status: body.status, at: new Date().toISOString() }); }
-      if (typeof body.paid === 'boolean') o.paid = body.paid;
-      this.save(db); return o;
-    }
-    if (path === '/api/export') { authed(); return db; }
-    err(404, 'Not found');
+  call(method, path, body) {
+    const tok = ls.get('sk_token') || '';
+    const [, uidPart, saltPart] = tok.split('.');
+    const u = this.env.db.users.find(x => x.id === uidPart);
+    const userId = u && u.salt.slice(0, 8) === saltPart ? u.id : null;
+    try { return JSON.parse(JSON.stringify(this.core.handle({ method, path, body: body ? JSON.parse(JSON.stringify(body)) : {}, userId }))); }
+    catch (e) { const er = new Error(e.message); er.status = e.status || 500; throw er; }
+  },
+  // sample team so every role can be tried in the preview
+  seedStaff() {
+    const team = [['Meena (Owner)', 'owner', 'owner'], ['Rahul', 'rahul', 'manager'], ['Suresh', 'suresh', 'cashier'], ['Ramesh', 'ramesh', 'delivery'], ['Vijay', 'vijay', 'delivery']];
+    for (const [name, username, role] of team) try { this.call('POST', '/api/users', { name, username, role, password: '1234', phone: '98' + Math.floor(10000000 + Math.random() * 89999999) }); } catch {}
   },
 };
 
@@ -121,9 +79,10 @@ const Api = {
       const r = await fetch('api/health', { signal: ctl.signal }); clearTimeout(t);
       const j = await r.json(); this.demo = !j.ok;
     } catch { this.demo = true; }
+    if (this.demo) Demo.init();
   },
   async call(method, path, body) {
-    if (this.demo) return DemoBackend.call(method, path, body ? JSON.parse(JSON.stringify(body)) : body);
+    if (this.demo) return Demo.call(method, path, body);
     const headers = { 'Content-Type': 'application/json' };
     const tok = ls.get('sk_token'); if (tok) headers.Authorization = 'Bearer ' + tok;
     const r = await fetch(path.slice(1), { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -139,7 +98,7 @@ const S = {
   cfg: null, products: [], cart: ls.get('sk_cart', []),
   cat: 'All', q: '', vegOnly: false,
   mode: null, wiz: null,
-  orders: [], orderFilter: 'active', seenOrders: new Set(ls.get('sk_seen', [])),
+  orders: [], orderFilter: 'active', me: ls.get('sk_user', null), staff: [],
 };
 const saveCart = () => ls.set('sk_cart', S.cart);
 const cartCount = () => S.cart.reduce((s, i) => s + i.qty, 0);
@@ -246,7 +205,10 @@ function renderWizard() {
       <div class="card stack">
         <label class="check ${w.samples ? 'on' : ''}"><input type="checkbox" id="w-samples" ${w.samples ? 'checked' : ''}><span><b>Add ${pr.products.length} sample ${esc(pr.labels.product)}s</b><br><span class="small muted">${esc(pr.products.slice(0, 4).map(p => p.name).join(', '))}… — edit prices and photos later, or delete them.</span></span></label>
         <div class="small muted">Categories: ${esc(w.cfg.categories.join(' · '))}</div>
-        <label class="f"><span>Admin password * (to manage orders and products)</span><input type="password" id="w-pw" placeholder="At least 6 characters" autocomplete="new-password"></label>
+        <div class="small" style="font-weight:700">Your admin login — you'll add manager, cashier and delivery boy logins after this.</div>
+        <div class="grid2"><label class="f"><span>Your name *</span><input type="text" id="w-aname" value="${esc(w.aname || '')}" placeholder="e.g. Bharat"></label>
+        <label class="f"><span>Login name *</span><input type="text" id="w-auser" value="${esc(w.auser || 'admin')}" autocapitalize="none"></label></div>
+        <label class="f"><span>Password * (at least 6 characters)</span><input type="password" id="w-pw" autocomplete="new-password"></label>
         <label class="f"><span>Type it again</span><input type="password" id="w-pw2" autocomplete="new-password"></label>
       </div>
       <div class="wiz-nav"><button class="btn lg" data-act="wizBack">← Back</button><span class="spacer"></span><button class="btn primary lg" data-act="wizFinish">🚀 Launch my store</button></div>`;
@@ -292,14 +254,17 @@ const wizActions = {
     const pw = $('#w-pw').value, pw2 = $('#w-pw2').value;
     if (pw.length < 6) return toast('Password must be at least 6 characters', 'bad');
     if (pw !== pw2) return toast('The two passwords don’t match', 'bad');
+    const aname = $('#w-aname').value.trim(), auser = $('#w-auser').value.trim();
+    if (!aname) return toast('Please enter your name', 'bad');
     el.disabled = true;
     try {
-      const r = await Api.post('/api/setup', { password: pw, config: S.wiz.cfg, products: S.wiz.samples ? presetProducts(S.wiz.type) : [] });
-      ls.set('sk_token', r.token);
+      const r = await Api.post('/api/setup', { password: pw, adminName: aname, username: auser || 'admin', config: S.wiz.cfg, products: S.wiz.samples ? presetProducts(S.wiz.type) : [] });
+      ls.set('sk_token', r.token); ls.set('sk_user', r.user); S.me = r.user; ls.set('sk_last_user', r.user.username);
+      if (Api.demo) Demo.seedStaff();
       S.wiz = null; S.cart = []; saveCart();
       await loadStore();
       toast('Your store is live! 🎉', 'ok');
-      go('#/admin/orders');
+      go(Api.demo ? '#/admin/orders' : '#/admin/staff');
     } catch (e) { toast(e.message, 'bad'); el.disabled = false; }
   },
 };
@@ -517,6 +482,7 @@ function renderCheckout() {
           <label class="f"><span>Delivery address *</span><textarea id="c-addr" autocomplete="street-address" placeholder="House / flat no., street, area">${esc(v.address)}</textarea></label>
           <div class="grid2"><label class="f"><span>Landmark</span><input type="text" id="c-land" value="${esc(v.landmark)}"></label>
           <label class="f"><span>Pincode</span><input type="text" id="c-pin" value="${esc(v.pincode)}" inputmode="numeric" maxlength="6"></label></div>` : ''}
+        ${S.mode === 'delivery' ? (v.geo ? `<div class="row geo-ok"><span>📍 Exact location added</span><span class="spacer"></span><button class="btn sm ghost" data-act="clearGeo">Remove</button></div>` : `<button class="btn block" data-act="useMyLocation">📍 Use my current location <span class="small muted">(helps the delivery boy find you)</span></button>`) : ''}
         ${S.mode === 'pickup' && c.address ? `<div class="pill">📍 Pick up from: ${esc(c.address)}</div>` : ''}
         ${S.mode === 'dinein' ? `<label class="f"><span>Table number *</span><input type="text" id="c-table" value="${esc(v.table)}" inputmode="numeric"></label>` : ''}
         ${c.features && c.features.slots && c.slots && c.slots.length && S.mode !== 'dinein' ? `<label class="f"><span>${S.mode === 'delivery' ? 'Delivery' : 'Pickup'} time</span><select id="c-slot">${['As soon as possible', ...c.slots].map(s => `<option ${v.slot === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>` : ''}
@@ -545,7 +511,7 @@ function renderCheckout() {
 
 async function placeOrder(btn) {
   const val = id => ($(id) ? $(id).value.trim() : '');
-  const customer = { name: val('#c-name'), phone: val('#c-phone'), address: val('#c-addr'), landmark: val('#c-land'), pincode: val('#c-pin') };
+  const customer = { name: val('#c-name'), phone: val('#c-phone'), address: val('#c-addr'), landmark: val('#c-land'), pincode: val('#c-pin'), geo: S.mode === 'delivery' && S.form && S.form.geo ? S.form.geo : null };
   if (!customer.name) return toast('Please enter your name', 'bad');
   if (customer.phone.replace(/\D/g, '').length < 10) return toast('Please enter a valid mobile number', 'bad');
   if (S.mode === 'delivery' && !customer.address) return toast('Please enter your delivery address', 'bad');
@@ -557,7 +523,7 @@ async function placeOrder(btn) {
       payment: ($('input[name=pay]:checked') || {}).value || 'cod',
       items: S.cart.map(i => ({ productId: i.productId, variant: i.variant, option2: i.option2, addons: i.addons, qty: i.qty, note: i.note })),
     });
-    ls.set('sk_customer', Object.assign(ls.get('sk_customer', {}), customer));
+    const { geo, ...keep } = customer; ls.set('sk_customer', Object.assign(ls.get('sk_customer', {}), keep));
     const mine = ls.get('sk_my_orders', []); mine.unshift({ id: r.id, number: r.number, total: r.total, at: new Date().toISOString() }); ls.set('sk_my_orders', mine.slice(0, 30));
     S.cart = []; saveCart();
     S.products = await Api.get('/api/products');
@@ -569,19 +535,8 @@ async function placeOrder(btn) {
 }
 
 // ---- order tracking ----
-const STATUS = {
-  new: { t: 'Order placed', e: '📝' }, accepted: { t: 'Accepted', e: '👍' },
-  preparing: { t: 'Being prepared', e: '👨‍🍳' }, ready: { t: 'Ready', e: '✅' },
-  out: { t: 'Out for delivery', e: '🛵' }, delivered: { t: 'Delivered', e: '🎉' }, cancelled: { t: 'Cancelled', e: '✖️' },
-};
-function statusName(s, mode) {
-  const bt = S.cfg && S.cfg.businessType;
-  if (s === 'preparing') return bt === 'food' || bt === 'bakery' ? 'Being prepared' : 'Being packed';
-  if (s === 'ready') return mode === 'pickup' ? 'Ready for pickup' : mode === 'dinein' ? 'Ready to serve' : 'Packed & ready';
-  if (s === 'delivered') return mode === 'delivery' ? 'Delivered' : 'Completed';
-  return STATUS[s].t;
-}
-const flowFor = mode => mode === 'delivery' ? ['new', 'accepted', 'preparing', 'out', 'delivered'] : ['new', 'accepted', 'preparing', 'ready', 'delivered'];
+const statusName = (s, mode) => Core.statusName(s, mode, S.cfg && S.cfg.businessType);
+const flowFor = Core.flowFor;
 function upiLink(o) {
   const c = S.cfg;
   return `upi://pay?pa=${encodeURIComponent(c.upiId)}&pn=${encodeURIComponent(c.name)}&am=${o.total.toFixed(2)}&cu=INR&tn=${encodeURIComponent('Order #' + o.number)}`;
@@ -592,25 +547,70 @@ function orderSummaryText(o) {
     ...o.lines.map(l => `• ${l.qty} × ${l.name}${l.variant ? ` (${l.variant})` : ''}${l.option2 ? ` [${l.option2}]` : ''}${l.addons && l.addons.length ? ` + ${l.addons.map(a => a.name).join(', ')}` : ''} — ₹${l.total}`),
     '', `*Total: ₹${o.total}* (${o.payment === 'upi' ? 'UPI' : 'Cash'})`, `${mn[o.mode]}${o.table ? ' · Table ' + o.table : ''}${o.slot ? ' · ' + o.slot : ''}`,
     `${o.customer.name}, ${o.customer.phone}`, o.mode === 'delivery' ? `📍 ${o.customer.address}${o.customer.landmark ? ', ' + o.customer.landmark : ''}${o.customer.pincode ? ' - ' + o.customer.pincode : ''}` : '',
+    o.customer.geo ? `Map: https://www.google.com/maps?q=${o.customer.geo.lat},${o.customer.geo.lng}` : '',
     o.note ? `Note: ${o.note}` : '', '', `Track: ${location.href.split('#')[0]}#/order/${o.id}`].filter(x => x !== '').join('\n');
+}
+
+// ---- Google Maps helpers ----
+const ll = p => `${(+p.lat).toFixed(6)},${(+p.lng).toFixed(6)}`;
+function destOf(o) {
+  const c = o.customer;
+  return c.geo ? ll(c.geo) : [c.address, c.landmark, c.pincode].filter(Boolean).join(', ');
+}
+const navLink = o => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destOf(o))}&travelmode=driving&dir_action=navigate`;
+const routeLink = o => o.rider ? `https://www.google.com/maps/dir/?api=1&origin=${ll(o.rider)}&destination=${encodeURIComponent(destOf(o))}&travelmode=driving` : navLink(o);
+function mapEmbedSrc(o) {
+  const key = S.cfg.mapsKey, d = destOf(o), r = o.rider;
+  if (key) return r ? `https://www.google.com/maps/embed/v1/directions?key=${encodeURIComponent(key)}&origin=${ll(r)}&destination=${encodeURIComponent(d)}&mode=driving` : `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(key)}&q=${encodeURIComponent(d)}`;
+  return r ? `https://maps.google.com/maps?saddr=${ll(r)}&daddr=${encodeURIComponent(d)}&output=embed` : `https://maps.google.com/maps?q=${encodeURIComponent(d)}&z=15&output=embed`;
+}
+const ago = iso => { const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)} min ago` : timeAgo(iso); };
+const fmtDist = m => m == null ? '' : m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`;
+function riderDistance(o) { return o.rider && o.customer.geo ? Math.round(Core.distanceM(o.rider, o.customer.geo)) : null; }
+
+function mapBox(o, height = 300) {
+  if (Api.demo) {
+    const d = riderDistance(o);
+    return `<div class="map-ph" style="height:${height}px"><div style="font-size:40px">🗺️</div><b>Live Google Map shows here</b>
+      <div class="small muted">${o.rider ? `Delivery boy at ${ll(o.rider)}${d != null ? ` · ${fmtDist(d)} away` : ''}` : 'Waiting for location…'}</div>
+      <div class="small muted">(Preview pages can't load Google Maps — it works on your own server.)</div></div>`;
+  }
+  return `<iframe class="map" id="map-frame" style="height:${height}px" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${esc(mapEmbedSrc(o))}"></iframe>`;
+}
+
+function activityHtml(o) {
+  return `<div class="activity">${o.history.slice().reverse().map(h => `<div class="act"><span class="act-ic">${h.status ? ({ new: '📝', accepted: '👍', preparing: '📦', ready: '✅', out: '🛵', delivered: '🎉', cancelled: '✖️' }[h.status] || '•') : /payment/i.test(h.text) ? '💰' : /location/i.test(h.text) ? '📍' : /deliver|assigned/i.test(h.text) ? '🧑‍✈️' : '•'}</span><div><div>${esc(h.text)}</div><div class="small muted">${fmtTime(h.at)}</div></div></div>`).join('')}</div>`;
+}
+
+function trackDynamic(o) {
+  const flow = flowFor(o.mode);
+  const idx = o.status === 'cancelled' ? -1 : flow.indexOf(o.status);
+  const when = s => (o.history.find(h => h.status === s) || {}).at;
+  const d = riderDistance(o);
+  return `
+    ${o.payment === 'upi' && !o.paid && o.status !== 'cancelled' ? `<div class="card stack" style="margin-top:12px"><b>Pay ${rupee(o.total)} by UPI</b>
+      <a class="btn primary lg block" href="${upiLink(o)}">📲 Pay with UPI app</a>
+      <div class="small muted">Or pay to UPI ID <b>${esc(S.cfg.upiId)}</b> and mention order #${o.number}. The store confirms your payment.</div></div>` : ''}
+    ${o.paid ? `<div class="pill ok" style="margin-top:12px">✓ Payment received</div>` : ''}
+    ${o.assignedTo && o.status !== 'cancelled' ? `<div class="card rider-card" style="margin-top:12px">
+      <div class="row"><div class="avatar">🛵</div><div style="flex:1"><b>${esc(o.assignedTo.name)}</b><div class="small muted">${o.status === 'out' ? (o.rider ? `On the way${d != null ? ` · ${fmtDist(d)} away` : ''} · updated ${ago(o.rider.at)}` : 'On the way — live location starting…') : o.status === 'delivered' ? 'Delivered your order' : 'Your delivery partner'}</div></div>
+      ${o.assignedTo.phone && o.status !== 'delivered' ? `<a class="btn sm" href="tel:${esc(o.assignedTo.phone)}">📞 Call</a>` : ''}</div>
+      ${o.status === 'out' && o.rider ? `<a class="btn block" style="margin-top:10px" href="${routeLink(o)}" target="_blank" rel="noopener">🗺️ Open route in Google Maps</a>` : ''}</div>` : ''}
+    <div class="card" style="margin-top:12px">
+      ${o.status === 'cancelled' ? `<div class="pill bad">This order was cancelled</div>` : `<div class="timeline">${flow.map((s, i) => `<div class="tl ${i <= idx ? 'done' : ''} ${i === idx ? 'cur' : ''}"><div class="dot">${i <= idx ? '✓' : ''}</div><div><div class="t">${esc(statusName(s, o.mode))}</div>${when(s) ? `<div class="small muted">${fmtTime(when(s))}</div>` : ''}</div></div>`).join('')}</div>`}
+    </div>
+    <div class="card" style="margin-top:12px"><h3>Order activity</h3>${activityHtml(o)}</div>`;
 }
 
 async function renderOrder(id) {
   const fresh = location.hash.endsWith('/new');
   let o;
   try { o = await Api.get('/api/orders/' + id); } catch (e) { app().innerHTML = `${storeHeader('#/')}<div class="narrow"><div class="empty"><div class="big">🤷</div>Order not found.</div></div>`; return; }
-  const flow = flowFor(o.mode);
-  const idx = o.status === 'cancelled' ? -1 : flow.indexOf(o.status);
-  const when = s => (o.history.find(h => h.status === s) || {}).at;
+  const showMap = o2 => o2.mode === 'delivery' && o2.status === 'out';
   app().innerHTML = `${storeHeader('#/')}<div class="narrow page-pad">
     ${fresh ? `<div class="card" style="margin-top:18px;text-align:center;background:var(--brand-soft);border-color:transparent"><div style="font-size:44px">🎉</div><h2>Order placed!</h2><p class="muted" style="margin:0">Order #${o.number} · ${rupee(o.total)}</p></div>` : `<h2 style="margin-top:18px">Order #${o.number}</h2>`}
-    ${o.payment === 'upi' && !o.paid && o.status !== 'cancelled' ? `<div class="card stack" style="margin-top:12px"><b>Pay ${rupee(o.total)} by UPI</b>
-      <a class="btn primary lg block" href="${upiLink(o)}">📲 Pay with UPI app</a>
-      <div class="small muted">Or pay to UPI ID <b>${esc(S.cfg.upiId)}</b> and mention order #${o.number}. The store confirms your payment.</div></div>` : ''}
-    ${o.paid ? `<div class="pill ok" style="margin-top:12px">✓ Payment received</div>` : ''}
-    <div class="card" style="margin-top:12px">
-      ${o.status === 'cancelled' ? `<div class="pill bad">This order was cancelled</div>` : `<div class="timeline">${flow.map((s, i) => `<div class="tl ${i <= idx ? 'done' : ''} ${i === idx ? 'cur' : ''}"><div class="dot">${i <= idx ? '✓' : ''}</div><div><div class="t">${esc(statusName(s, o.mode))}</div>${when(s) ? `<div class="small muted">${fmtTime(when(s))}</div>` : ''}</div></div>`).join('')}</div>`}
-    </div>
+    <div id="map-wrap" style="margin-top:12px">${showMap(o) ? mapBox(o) : ''}</div>
+    <div id="track-dyn">${trackDynamic(o)}</div>
     <div class="card" style="margin-top:12px"><div class="bill">
       ${o.lines.map(l => `<div class="r"><span>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` · ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br><span class="small muted">+ ${esc(l.addons.map(a => a.name).join(', '))}</span>` : ''}</span><span>${rupee(l.total)}</span></div>`).join('')}
       ${o.deliveryFee ? `<div class="r"><span>Delivery</span><span>${rupee(o.deliveryFee)}</span></div>` : ''}
@@ -624,11 +624,19 @@ async function renderOrder(id) {
     </div>
     <a class="btn ghost block" href="#/" style="margin-top:8px">← Back to store</a>
   </div>`;
-  if (!['delivered', 'cancelled'].includes(o.status)) {
-    pollTimer = setInterval(async () => {
-      try { const n = await Api.get('/api/orders/' + id); if (n.status !== o.status || n.paid !== o.paid) { if (fresh) location.hash = '#/order/' + id; else { stopPolling(); renderOrder(id); } } } catch {}
-    }, 15000);
-  }
+  let mapAt = o.rider ? { lat: o.rider.lat, lng: o.rider.lng } : null;
+  if (['delivered', 'cancelled'].includes(o.status)) return;
+  pollTimer = setInterval(async () => {
+    let n; try { n = await Api.get('/api/orders/' + id); } catch { return; }
+    $('#track-dyn') && ($('#track-dyn').innerHTML = trackDynamic(n));
+    const wrap = $('#map-wrap'); if (!wrap) return;
+    if (showMap(n)) {
+      // only reload the map when the delivery boy has moved a bit, so it doesn't flicker
+      const moved = n.rider && (!mapAt || Core.distanceM(mapAt, n.rider) > 40);
+      if (!wrap.innerHTML || moved || Api.demo) { wrap.innerHTML = mapBox(n); if (n.rider) mapAt = { lat: n.rider.lat, lng: n.rider.lng }; }
+    } else wrap.innerHTML = '';
+    if (['delivered', 'cancelled'].includes(n.status)) stopPolling();
+  }, o.mode === 'delivery' ? 8000 : 15000);
 }
 
 function renderMyOrders() {
@@ -638,120 +646,318 @@ function renderMyOrders() {
     : `<div class="empty"><div class="big">🧾</div>No orders on this phone yet.</div>`}</div>`;
 }
 
-// ================= admin =================
+// ================= staff area (admin / owner / manager / cashier / delivery) =================
 let events = null;
+function staffTabs() {
+  const t = [];
+  if (can('viewOrders')) t.push(['orders', 'Orders']);
+  if (S.me && S.me.role === 'delivery') t.push(['deliveries', 'My deliveries']);
+  if (can('products')) t.push(['products', L('products') === 'Menu' ? 'Menu' : 'Products']);
+  if (can('staff')) t.push(['staff', 'Staff']);
+  if (can('settings')) t.push(['settings', 'Settings']);
+  t.push(['me', '👤']);
+  return t;
+}
+const homeTab = () => S.me && S.me.role === 'delivery' ? 'deliveries' : 'orders';
 function adminShell(tab, inner) {
   const c = S.cfg;
   return `<div class="admin"><header class="admin-top"><div class="wrap-page inner">
       <div class="logo" style="width:34px;height:34px;font-size:18px">${c.logoImage ? `<img src="${esc(c.logoImage)}" alt="">` : esc(c.logoEmoji || '🛍️')}</div>
-      <nav class="tabs">
-        <a href="#/admin/orders" class="${tab === 'orders' ? 'on' : ''}">Orders</a>
-        <a href="#/admin/products" class="${tab === 'products' || tab === 'product' ? 'on' : ''}">${esc(L('products') === 'Menu' ? 'Menu' : 'Products')}</a>
-        <a href="#/admin/settings" class="${tab === 'settings' ? 'on' : ''}">Settings</a>
-      </nav>
+      <nav class="tabs">${staffTabs().map(([k, t]) => `<a href="#/admin/${k}" class="${tab === k || (tab === 'product' && k === 'products') ? 'on' : ''}" ${k === 'me' ? `title="My account"` : ''}>${esc(t)}</a>`).join('')}</nav>
       <span class="spacer"></span>
-      <a href="#/" class="btn sm" style="background:transparent;color:#fff;border-color:#3a3e46" target="_blank"><span class="store-link-txt">View store </span>↗</a>
-    </div></header><div class="wrap-page" style="padding-bottom:60px">${inner}</div></div>`;
+      <span class="who small"><b>${esc(S.me.name)}</b><br>${esc(roleLabel(S.me.role))}</span>
+      ${S.me.role !== 'delivery' ? `<a href="#/" class="btn sm" style="background:transparent;color:#fff;border-color:#3a3e46" target="_blank"><span class="store-link-txt">Store </span>↗</a>` : ''}
+    </div></header>${Tracker.bar()}<div class="wrap-page" style="padding-bottom:60px">${inner}</div></div>`;
 }
 
 function renderLogin() {
+  const demoTeam = Api.demo ? Demo.env.db.users.filter(u => u.active !== false) : [];
   app().innerHTML = `<div class="narrow"><div class="card login-box stack">
-    <div style="text-align:center"><div class="logo" style="margin:0 auto 10px">${esc(S.cfg.logoEmoji || '🛍️')}</div><h2>${esc(S.cfg.name)} admin</h2></div>
-    <label class="f"><span>Password</span><input type="password" id="l-pw" autocomplete="current-password"></label>
+    <div style="text-align:center"><div class="logo" style="margin:0 auto 10px">${esc(S.cfg.logoEmoji || '🛍️')}</div><h2>${esc(S.cfg.name)}</h2><div class="muted">Staff login</div></div>
+    <label class="f"><span>Login name</span><input type="text" id="l-user" autocomplete="username" autocapitalize="none" value="${esc(ls.get('sk_last_user', ''))}"></label>
+    <label class="f"><span>Password / PIN</span><input type="password" id="l-pw" autocomplete="current-password"></label>
     <button class="btn primary block lg" data-act="login">Log in</button>
+    ${demoTeam.length ? `<div class="small muted" style="text-align:center">Demo — tap to log in as:</div><div class="row wrap" style="justify-content:center">${demoTeam.map(u => `<button class="btn sm" data-act="demoLogin" data-u="${esc(u.username)}">${Core.ROLES[u.role].emoji} ${esc(u.name.replace(/ \(.*/, ''))} · ${esc(roleLabel(u.role))}</button>`).join('')}</div><div class="small muted" style="text-align:center">Staff PIN is 1234; admin uses the password from setup.</div>` : ''}
     <a href="#/" class="btn ghost block">← Back to store</a></div></div>`;
-  const i = $('#l-pw'); i.focus(); i.onkeydown = e => { if (e.key === 'Enter') actions.login(); };
+  const u = $('#l-user'), p = $('#l-pw'); (u.value ? p : u).focus();
+  p.onkeydown = e => { if (e.key === 'Enter') actions.login(); };
 }
 
 async function renderAdmin(tab, rest) {
-  if (!ls.get('sk_token')) return renderLogin();
+  if (!ls.get('sk_token') || !S.me) return renderLogin();
   try {
+    S.me = await Api.get('/api/me'); ls.set('sk_user', S.me);
+    const allowed = staffTabs().map(t => t[0]).concat(can('products') ? ['product'] : []);
+    if (!allowed.includes(tab)) return go('#/admin/' + homeTab());
     if (tab === 'orders') await renderAdminOrders();
+    else if (tab === 'deliveries') await renderDeliveries();
     else if (tab === 'products') await renderAdminProducts();
     else if (tab === 'product') renderProductForm(rest);
+    else if (tab === 'staff') await renderStaff();
     else if (tab === 'settings') renderSettings();
-    else go('#/admin/orders');
+    else if (tab === 'me') renderMe();
     connectEvents();
+    Tracker.sync();
   } catch (e) {
-    if (e.status === 401) { ls.del('sk_token'); renderLogin(); } else toast(e.message, 'bad');
+    if (e.status === 401) { logout(); renderLogin(); } else toast(e.message, 'bad');
   }
 }
+function logout() { ls.del('sk_token'); ls.del('sk_user'); S.me = null; S.ordersInit = false; S.orders = []; Tracker.stop(); if (events) { events.close(); events = null; } }
 
 function connectEvents() {
-  if (Api.demo) {
-    if (!window.__skStorage) { window.__skStorage = true; window.addEventListener('storage', e => { if (e.key === DemoBackend.key) onNewOrderMaybe(); }); }
-    return;
-  }
-  if (events) return;
+  if (Api.demo || events) return;
   events = new EventSource('api/events?token=' + encodeURIComponent(ls.get('sk_token')));
-  events.addEventListener('order', e => { const d = JSON.parse(e.data); notifyNewOrder(d); });
-  events.onerror = () => { events.close(); events = null; setTimeout(() => location.hash.startsWith('#/admin') && connectEvents(), 8000); };
+  for (const ev of ['order', 'update', 'assigned']) events.addEventListener(ev, e => onStaffEvent(ev, JSON.parse(e.data)));
+  events.onerror = () => { events.close(); events = null; setTimeout(() => location.hash.startsWith('#/admin') && S.me && connectEvents(), 8000); };
 }
-async function onNewOrderMaybe() {
-  const before = S.orders.length ? S.orders[0].id : null;
-  const list = await Api.get('/api/orders');
-  if (list.length && list[0].id !== before && list[0].status === 'new') notifyNewOrder(list[0]);
-}
-function beep() {
+function beep(times = 3) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    [0, .25, .5].forEach(t => { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = 880; o.connect(g); g.connect(ctx.destination); g.gain.setValueAtTime(.25, ctx.currentTime + t); g.gain.exponentialRampToValueAtTime(.001, ctx.currentTime + t + .2); o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + .22); });
+    for (let i = 0; i < times; i++) { const t = i * .25, o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = 880; o.connect(g); g.connect(ctx.destination); g.gain.setValueAtTime(.25, ctx.currentTime + t); g.gain.exponentialRampToValueAtTime(.001, ctx.currentTime + t + .2); o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + .22); }
   } catch {}
+  try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch {}
 }
-function notifyNewOrder(d) {
-  beep();
-  toast(`🔔 New order #${d.number} — ${rupee(d.total)}`, 'ok');
-  try { if (Notification.permission === 'granted') new Notification(`New order #${d.number}`, { body: `${d.name || d.customer && d.customer.name || ''} · ₹${d.total}` }); } catch {}
-  if (location.hash.startsWith('#/admin/orders') || location.hash === '#/admin') renderAdminOrders();
+function alertStaff(title, body) {
+  beep(); toast(`🔔 ${title}`, 'ok');
+  try { if (Notification.permission === 'granted') new Notification(title, { body }); } catch {}
+}
+// live events: new order, status change, assignment
+function onStaffEvent(ev, d) {
+  if (!S.me || !location.hash.startsWith('#/admin')) return;
+  const r = S.me.role;
+  if (ev === 'order' && ['admin', 'owner', 'manager'].includes(r)) alertStaff(`New order #${d.number} — ${rupee(d.total)}`, d.name || '');
+  if (ev === 'update' && r === 'cashier' && d.status === 'accepted') alertStaff('Order accepted — please pack it', '');
+  if (ev === 'update' && ['admin', 'owner', 'manager'].includes(r) && d.status === 'ready') toast('📦 An order is packed and ready');
+  if (ev === 'assigned' && r === 'delivery' && d.riderId === S.me.id) alertStaff(`New delivery #${d.number}`, 'Open My deliveries');
+  if (Api.demo && ev === 'sync' && r === 'delivery') { /* other tab changed something */ }
+  const h = location.hash;
+  if (h.startsWith('#/admin/orders')) renderAdminOrders().catch(() => {});
+  if (h.startsWith('#/admin/deliveries')) renderDeliveries().catch(() => {});
 }
 
+// ---------- orders (manager / cashier / owner / admin) ----------
+const ORDER_FILTERS = [['active', 'Active'], ['new', 'New'], ['topack', 'To pack'], ['ready', 'Ready'], ['out', 'On the way'], ['done', 'Completed'], ['cancelled', 'Cancelled'], ['all', 'All']];
 async function renderAdminOrders() {
-  S.orders = await Api.get('/api/orders');
+  const [orders, staff] = await Promise.all([Api.get('/api/orders'), can('assign') ? Api.get('/api/users') : Promise.resolve([])]);
+  S.orders = orders; S.staff = staff;
+  if (!S.ordersInit) { S.ordersInit = true; S.orderFilter = S.me.role === 'cashier' ? 'topack' : 'active'; }
   const today = new Date().toDateString();
   const todays = S.orders.filter(o => new Date(o.createdAt).toDateString() === today && o.status !== 'cancelled');
   const active = S.orders.filter(o => !['delivered', 'cancelled'].includes(o.status));
   const f = S.orderFilter;
-  const list = S.orders.filter(o => f === 'all' ? true : f === 'active' ? !['delivered', 'cancelled'].includes(o.status) : f === 'done' ? o.status === 'delivered' : o.status === f).slice(0, 200);
+  const match = o => f === 'all' || (f === 'active' ? !['delivered', 'cancelled'].includes(o.status) : f === 'topack' ? ['accepted', 'preparing'].includes(o.status) : f === 'done' ? o.status === 'delivered' : o.status === f);
+  const list = S.orders.filter(match).slice(0, 200);
+  const count = k => S.orders.filter(o => k === 'topack' ? ['accepted', 'preparing'].includes(o.status) : o.status === k).length;
   const c = S.cfg;
+  const y = window.scrollY;
   app().innerHTML = adminShell('orders', `
     <div class="stats">
-      <div class="stat"><div class="k">Today's orders</div><div class="v">${todays.length}</div></div>
-      <div class="stat"><div class="k">Today's sales</div><div class="v">${rupee(todays.reduce((s, o) => s + o.total, 0))}</div></div>
+      ${can('reports') ? `<div class="stat"><div class="k">Today's orders</div><div class="v">${todays.length}</div></div>
+      <div class="stat"><div class="k">Today's sales</div><div class="v">${rupee(todays.reduce((s, o) => s + o.total, 0))}</div></div>` : `<div class="stat"><div class="k">New</div><div class="v">${count('new')}</div></div><div class="stat"><div class="k">To pack</div><div class="v">${count('topack')}</div></div>`}
       <div class="stat"><div class="k">Active orders</div><div class="v">${active.length}</div></div>
-      <div class="stat"><div class="k">Store</div><div class="v" style="font-size:16px;padding-top:4px"><label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="accepting" ${c.acceptingOrders ? 'checked' : ''}><i></i></span>${c.acceptingOrders ? 'Taking orders' : 'Paused'}</label></div></div>
+      <div class="stat"><div class="k">Store</div><div class="v" style="font-size:16px;padding-top:4px">${can('accept') ? `<label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="accepting" ${c.acceptingOrders ? 'checked' : ''}><i></i></span>${c.acceptingOrders ? 'Taking orders' : 'Paused'}</label>` : (c.acceptingOrders ? 'Taking orders' : 'Paused')}</div></div>
     </div>
     <div class="row wrap" style="margin-bottom:12px">
-      <div class="chips" style="padding:0">${[['active', 'Active'], ['new', 'New'], ['done', 'Completed'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, t]) => `<button class="chip ${f === k ? 'on' : ''}" data-act="ofilter" data-f="${k}">${t}</button>`).join('')}</div>
+      <div class="chips" style="padding:0">${ORDER_FILTERS.map(([k, t]) => { const n = ['new', 'topack', 'ready', 'out'].includes(k) ? count(k) : 0; return `<button class="chip ${f === k ? 'on' : ''}" data-act="ofilter" data-f="${k}">${t}${n ? ` · ${n}` : ''}</button>`; }).join('')}</div>
       <span class="spacer"></span>
       ${'Notification' in window && Notification.permission === 'default' ? `<button class="btn sm" data-act="askNotify">🔔 Enable alerts</button>` : ''}
-      <button class="btn sm" data-act="refreshOrders">↻ Refresh</button>
+      <button class="btn sm" data-act="refreshOrders">↻</button>
     </div>
-    ${list.length ? `<div class="olist">${list.map(orderCard).join('')}</div>` : `<div class="empty"><div class="big">📭</div>${f === 'active' ? 'No active orders right now. New orders will ring here.' : 'No orders here.'}<br><br><a class="btn" href="#/" target="_blank">Open your store to test an order</a></div>`}
+    ${list.length ? `<div class="olist">${list.map(orderCard).join('')}</div>` : `<div class="empty"><div class="big">📭</div>${f === 'active' || f === 'topack' ? 'Nothing waiting right now. New orders will ring here.' : 'No orders here.'}</div>`}
   `);
-  $('#accepting').onchange = async e => { await Api.put('/api/config', { acceptingOrders: e.target.checked }); S.cfg = await Api.get('/api/config'); renderAdminOrders(); toast(e.target.checked ? 'Store is taking orders' : 'Orders paused'); };
-  if (!pollTimer) pollTimer = setInterval(() => { if (location.hash.startsWith('#/admin/orders')) renderAdminOrders().catch(() => {}); }, 60000);
+  window.scrollTo(0, y);
+  const acc = $('#accepting');
+  if (acc) acc.onchange = async e => { await Api.post('/api/accepting', { on: e.target.checked }); S.cfg = await Api.get('/api/config'); renderAdminOrders(); toast(e.target.checked ? 'Store is taking orders' : 'Orders paused'); };
+  if (!pollTimer) pollTimer = setInterval(() => { if (location.hash.startsWith('#/admin/orders')) renderAdminOrders().catch(() => {}); }, Api.demo ? 4000 : 60000);
+}
+
+function orderButtons(o) {
+  const b = [], final = ['delivered', 'cancelled'].includes(o.status), bt = S.cfg.businessType;
+  const btn = (s, label, cls = 'primary') => `<button class="btn ${cls} sm" style="flex:1" data-act="setStatus" data-id="${o.id}" data-s="${s}">${label}</button>`;
+  if (o.status === 'new' && can('accept')) b.push(btn('accepted', '✓ Accept order'));
+  if (o.status === 'new' && !can('accept')) b.push(`<span class="small muted">Waiting for the manager to accept</span>`);
+  if (o.status === 'accepted' && can('pack')) b.push(btn('preparing', bt === 'food' || bt === 'bakery' ? '👨‍🍳 Start preparing' : '📦 Start packing'));
+  if (o.status === 'preparing' && can('pack')) b.push(btn('ready', o.mode === 'delivery' ? '✅ Packed — ready for delivery' : '✅ Mark ready'));
+  if (o.status === 'ready' && o.mode !== 'delivery' && can('pack')) b.push(btn('delivered', o.mode === 'dinein' ? '🍽️ Served' : '🤝 Handed over'));
+  if (o.status === 'ready' && o.mode === 'delivery') b.push(`<span class="small muted">${o.assignedTo ? `Waiting for ${esc(o.assignedTo.name)} to pick up` : 'Assign a delivery boy ↓'}</span>`);
+  if (o.status === 'out' && can('accept')) b.push(btn('delivered', 'Mark delivered', ''));
+  b.push(`<button class="btn sm" data-act="printBill" data-id="${o.id}">🖨️</button>`);
+  if (!final && can('accept')) b.push(`<button class="btn sm danger" data-act="cancelOrder" data-id="${o.id}">Cancel</button>`);
+  return b.join('');
 }
 
 function orderCard(o) {
-  const flow = flowFor(o.mode);
-  const i = flow.indexOf(o.status);
-  const next = o.status === 'cancelled' || i < 0 || i === flow.length - 1 ? null : flow[i + 1];
-  const nextLabel = { accepted: '✓ Accept order', preparing: S.cfg.businessType === 'food' || S.cfg.businessType === 'bakery' ? '👨‍🍳 Start preparing' : '📦 Start packing', ready: '✅ Mark ready', out: '🛵 Out for delivery', delivered: o.mode === 'delivery' ? '🎉 Mark delivered' : '🎉 Mark completed' }[next];
   const pill = { new: 'brand', accepted: 'warn', preparing: 'warn', ready: 'ok', out: 'ok', delivered: '', cancelled: 'bad' }[o.status];
-  const cu = o.customer;
+  const cu = o.customer, final = ['delivered', 'cancelled'].includes(o.status);
+  const riders = S.staff.filter(u => u.role === 'delivery' && u.active);
+  const busy = id => S.orders.filter(x => x.status === 'out' && x.assignedTo && x.assignedTo.id === id).length;
+  const last = o.history[o.history.length - 1];
   return `<div class="ocard ${o.status === 'new' ? 'new' : ''}">
     <div class="row"><b style="font-size:17px">#${o.number}</b><span class="pill ${pill}">${esc(statusName(o.status, o.mode))}</span><span class="spacer"></span><span class="small muted">${timeAgo(o.createdAt)}</span></div>
     <div class="small" style="margin-top:6px"><b>${esc(cu.name)}</b> · <a href="tel:${esc(cu.phone)}">${esc(cu.phone)}</a> · <a href="${waLink(cu.phone, `Hi ${cu.name}, about your order #${o.number} from ${S.cfg.name}: `)}" target="_blank" rel="noopener">WhatsApp</a></div>
-    <div class="small muted">${o.mode === 'delivery' ? '🛵 ' + esc(cu.address + (cu.landmark ? ', ' + cu.landmark : '') + (cu.pincode ? ' - ' + cu.pincode : '')) : o.mode === 'dinein' ? '🍽️ Table ' + esc(o.table) : '🏬 ' + esc(MODE_NAMES().pickup)}${o.slot ? ' · ⏰ ' + esc(o.slot) : ''}</div>
+    <div class="small muted">${o.mode === 'delivery' ? '🛵 ' + esc(cu.address + (cu.landmark ? ', ' + cu.landmark : '') + (cu.pincode ? ' - ' + cu.pincode : '')) + (cu.geo ? ` · <a href="https://www.google.com/maps?q=${ll(cu.geo)}" target="_blank" rel="noopener">📍 pin</a>` : '') : o.mode === 'dinein' ? '🍽️ Table ' + esc(o.table) : '🏬 ' + esc(MODE_NAMES().pickup)}${o.slot ? ' · ⏰ ' + esc(o.slot) : ''}</div>
     <div class="oitems">${o.lines.map(l => `<div><span>${l.qty} × ${esc(l.name)}${l.variant ? ` <b>(${esc(l.variant)})</b>` : ''}${l.option2 ? ` · ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br><span class="muted small">+ ${esc(l.addons.map(a => a.name).join(', '))}</span>` : ''}${l.note ? `<br><span class="small" style="color:var(--warn)">“${esc(l.note)}”</span>` : ''}</span><span>${rupee(l.total)}</span></div>`).join('')}
       ${o.note ? `<div class="small" style="color:var(--warn);margin-top:6px">Note: ${esc(o.note)}</div>` : ''}</div>
     <div class="row"><b>${rupee(o.total)}</b><span class="pill ${o.paid ? 'ok' : ''}">${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${o.paid ? 'Paid' : 'Unpaid'}</span><span class="spacer"></span>
-      <button class="btn sm ghost" data-act="togglePaid" data-id="${o.id}">${o.paid ? 'Mark unpaid' : 'Mark paid'}</button></div>
-    <div class="row wrap" style="margin-top:10px">
-      ${next ? `<button class="btn primary sm" style="flex:1" data-act="setStatus" data-id="${o.id}" data-s="${next}">${nextLabel}</button>` : ''}
-      <button class="btn sm" data-act="printBill" data-id="${o.id}">🖨️ Bill</button>
-      ${!['delivered', 'cancelled'].includes(o.status) ? `<button class="btn sm danger" data-act="cancelOrder" data-id="${o.id}">Cancel</button>` : ''}
-    </div></div>`;
+      ${can('payment') && !(o.status === 'cancelled') ? `<button class="btn sm ghost" data-act="togglePaid" data-id="${o.id}">${o.paid ? 'Mark unpaid' : 'Mark paid'}</button>` : ''}</div>
+    ${o.mode === 'delivery' && !final && can('assign') ? `<div class="row assign" style="margin-top:8px"><span class="small" style="font-weight:600">🛵 Delivery boy</span>
+      <select data-assign="${o.id}" ${o.status === 'out' ? 'disabled' : ''}><option value="">— choose —</option>${riders.map(r => `<option value="${r.id}" ${o.assignedTo && o.assignedTo.id === r.id ? 'selected' : ''}>${esc(r.name)}${busy(r.id) ? ` (on ${busy(r.id)} delivery)` : ' (free)'}</option>`).join('')}</select></div>
+      ${!riders.length ? `<div class="small muted">No delivery boys yet — ${can('staff') ? '<a href="#/admin/staff">add one in Staff</a>' : 'ask the owner to add one'}.</div>` : ''}` : ''}
+    ${o.mode === 'delivery' && o.assignedTo && (!can('assign') || final) ? `<div class="small" style="margin-top:8px">🛵 ${esc(o.assignedTo.name)}</div>` : ''}
+    ${o.status === 'out' ? `<div class="small" style="margin-top:6px">${o.rider ? `📍 Live · ${fmtDist(riderDistance(o)) || 'location'} ${riderDistance(o) != null ? 'from customer' : ''} · ${ago(o.rider.at)} · <a href="${routeLink(o)}" target="_blank" rel="noopener">see on map</a>` : '⏳ Waiting for live location'}</div>` : ''}
+    <div class="small muted" style="margin-top:6px">Last: ${esc(last.text)}</div>
+    <div class="row wrap" style="margin-top:10px">${orderButtons(o)}</div>
+    <div class="row" style="margin-top:6px"><a class="small" href="#/order/${o.id}" target="_blank">Customer tracking page ↗</a><span class="spacer"></span><button class="btn sm ghost" data-act="showLog" data-id="${o.id}">Activity log</button></div>
+  </div>`;
+}
+
+// ---------- delivery boy ----------
+// Shares the phone's GPS for every order that's out for delivery, while this page is open.
+const Tracker = {
+  watch: null, last: 0, pos: null, status: 'off', err: '', sim: null, wake: null, out: [],
+  bar() {
+    if (!S.me || S.me.role !== 'delivery' || !this.out.length) return '';
+    const cls = this.status === 'on' ? 'ok' : this.status === 'error' ? 'bad' : 'warn';
+    return `<div class="track-bar ${cls}"><div class="wrap-page row"><span class="live-dot"></span><span style="flex:1">${this.status === 'on' ? `Sharing live location with ${this.out.length} customer${this.out.length > 1 ? 's' : ''}${this.pos ? ` · ±${Math.round(this.pos.acc)} m` : ''}` : this.status === 'error' ? esc(this.err) : 'Getting your location…'}</span>${Api.demo ? `<button class="btn sm" data-act="simDrive">${this.sim ? '⏸ Stop' : '▶️ Simulate drive'}</button>` : ''}</div></div>`;
+  },
+  refreshBar() { const old = $('.track-bar'); const html = this.bar(); if (old) old.outerHTML = html || ''; else if (html) $('.admin-top') && $('.admin-top').insertAdjacentHTML('afterend', html); },
+  async sync() {
+    if (!S.me || S.me.role !== 'delivery') return this.stop();
+    try { this.out = (await Api.get('/api/orders')).filter(o => o.status === 'out'); } catch { return; }
+    if (this.out.length) this.start(); else this.stop();
+    this.refreshBar();
+  },
+  start() {
+    if (this.watch != null || this.sim) return;
+    if (!('geolocation' in navigator)) return this.setErr('This phone/browser has no GPS access.');
+    if (!window.isSecureContext) return this.setErr('Live location needs the store opened over https:// (your Cloudflare domain).');
+    this.status = 'wait';
+    this.watch = navigator.geolocation.watchPosition(p => this.onPos({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy, speed: p.coords.speed }),
+      e => this.setErr(e.code === 1 ? 'Location permission denied — allow location for this site in Chrome settings.' : 'Could not get GPS — ' + e.message),
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+    this.keepAwake();
+    clearInterval(this.beat);
+    this.beat = setInterval(() => { if (this.pos && Date.now() - this.last > 30000) this.onPos(this.pos, true); }, 10000);
+  },
+  stop() {
+    if (this.watch != null) navigator.geolocation.clearWatch(this.watch);
+    this.watch = null; clearInterval(this.sim); this.sim = null; clearInterval(this.beat); clearTimeout(this.pending); this.status = 'off'; this.out = [];
+    try { this.wake && this.wake.release(); } catch {} this.wake = null;
+  },
+  setErr(msg) { this.status = 'error'; this.err = msg; this.refreshBar(); },
+  async keepAwake() { try { if ('wakeLock' in navigator) this.wake = await navigator.wakeLock.request('screen'); } catch {} },
+  async onPos(pos, force) {
+    this.pos = pos; this.status = 'on';
+    const wait = 8000 - (Date.now() - this.last);
+    if (!force && wait > 0) {
+      // too soon — send this newest position as soon as the gap is over
+      clearTimeout(this.pending); this.pending = setTimeout(() => this.onPos(this.pos, true), wait);
+      return this.refreshBar();
+    }
+    clearTimeout(this.pending);
+    this.last = Date.now();
+    for (const o of this.out) { try { await Api.post(`/api/orders/${o.id}/location`, pos); } catch (e) { if (e.status === 409 || e.status === 403) this.sync(); } }
+    this.refreshBar();
+    if (location.hash.startsWith('#/admin/deliveries')) renderDeliveries(true).catch(() => {});
+  },
+  // preview only: pretend to ride towards the customer
+  toggleSim() {
+    if (this.sim) { clearInterval(this.sim); this.sim = null; return this.refreshBar(); }
+    const o = this.out[0]; if (!o) return;
+    const dest = o.customer.geo || { lat: 26.9124, lng: 75.7873 };
+    let p = this.pos || { lat: dest.lat + 0.018, lng: dest.lng + 0.022 };
+    this.sim = setInterval(() => {
+      p = { lat: p.lat + (dest.lat - p.lat) * 0.15, lng: p.lng + (dest.lng - p.lng) * 0.15, acc: 8 + Math.random() * 6, speed: 7 };
+      this.onPos(p, true);
+    }, 2500);
+    this.refreshBar();
+  },
+};
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Tracker.watch != null) Tracker.keepAwake(); });
+
+async function renderDeliveries(quiet) {
+  const list = await Api.get('/api/orders');
+  const mine = list.filter(o => !['delivered', 'cancelled'].includes(o.status));
+  const done = list.filter(o => o.status === 'delivered');
+  Tracker.out = list.filter(o => o.status === 'out');
+  const cash = done.filter(o => o.payment === 'cod' && o.paid).reduce((s, o) => s + o.total, 0);
+  const html = adminShell('deliveries', `
+    <div class="row" style="margin:16px 0 8px"><h2 style="margin:0">Hi ${esc(S.me.name)} 👋</h2><span class="spacer"></span><button class="btn sm" data-act="refreshDeliveries">↻</button></div>
+    <div class="stats" style="grid-template-columns:repeat(3,1fr)"><div class="stat"><div class="k">To deliver</div><div class="v">${mine.length}</div></div><div class="stat"><div class="k">Delivered today</div><div class="v">${done.length}</div></div><div class="stat"><div class="k">Cash collected</div><div class="v">${rupee(cash)}</div></div></div>
+    ${mine.length ? `<div class="olist">${mine.map(deliveryCard).join('')}</div>` : `<div class="empty"><div class="big">🛵</div>No deliveries assigned right now.<br>You'll hear a beep when the manager gives you one.</div>`}
+    ${done.length ? `<h3 style="margin-top:24px">Done today</h3><div class="card">${done.map(o => `<div class="line"><div class="thumb">✅</div><div style="flex:1"><b>#${o.number} · ${esc(o.customer.name)}</b><div class="small muted">${esc(o.customer.address)}</div></div><div style="text-align:right"><b>${rupee(o.total)}</b><div class="small muted">${o.payment === 'cod' ? 'Cash' : 'UPI'}</div></div></div>`).join('')}</div>` : ''}
+    <p class="small muted" style="margin-top:20px">Keep this page open while delivering — your phone shares its location only while the page is on screen. Use the Navigate button for Google Maps directions, then come back here to mark delivered.</p>`);
+  if (quiet && $('.olist') && document.activeElement && document.activeElement.type === 'checkbox') return; // don't wipe a ticked box
+  app().innerHTML = html;
+  if (!pollTimer) pollTimer = setInterval(() => { if (location.hash.startsWith('#/admin/deliveries')) { renderDeliveries(true).catch(() => {}); Tracker.sync(); } }, Api.demo ? 4000 : 30000);
+  Tracker.sync();
+}
+function deliveryCard(o) {
+  const cu = o.customer, cod = o.payment === 'cod' && !o.paid, d = riderDistance(o);
+  return `<div class="ocard ${o.status === 'out' ? 'new' : ''}">
+    <div class="row"><b style="font-size:17px">#${o.number}</b><span class="pill ${o.status === 'out' ? 'ok' : o.status === 'ready' ? 'brand' : 'warn'}">${o.status === 'out' ? 'On the way' : o.status === 'ready' ? 'Ready to pick up' : 'Being packed…'}</span><span class="spacer"></span>${cod ? `<span class="pill warn">Collect ${rupee(o.total)}</span>` : `<span class="pill ok">Paid</span>`}</div>
+    <div style="margin-top:8px"><b>${esc(cu.name)}</b></div>
+    <div>${esc(cu.address)}${cu.landmark ? `<br><span class="muted">Near ${esc(cu.landmark)}</span>` : ''}${cu.pincode ? ` · ${esc(cu.pincode)}` : ''}</div>
+    ${o.status === 'out' && d != null ? `<div class="small muted">${fmtDist(d)} to go</div>` : ''}
+    <div class="small muted" style="margin-top:4px">${o.lines.reduce((s, l) => s + l.qty, 0)} items · ${o.lines.map(l => esc(l.name)).slice(0, 3).join(', ')}${o.lines.length > 3 ? '…' : ''}</div>
+    ${o.note ? `<div class="small" style="color:var(--warn)">Note: ${esc(o.note)}</div>` : ''}
+    <div class="row wrap" style="margin-top:10px"><a class="btn sm" style="flex:1" href="tel:${esc(cu.phone)}">📞 Call</a><a class="btn sm" style="flex:1" href="${waLink(cu.phone, `Hi ${cu.name}, I'm ${S.me.name} from ${S.cfg.name} with your order #${o.number}.`)}" target="_blank" rel="noopener">💬 WhatsApp</a><a class="btn sm" style="flex:1" href="${navLink(o)}" target="_blank" rel="noopener">🧭 Navigate</a></div>
+    ${o.status === 'out' ? `
+      ${cod ? `<label class="check" style="margin-top:10px"><input type="checkbox" id="cash-${o.id}"><span>I collected <b>${rupee(o.total)}</b> cash</span></label>` : ''}
+      <button class="btn primary lg block" style="margin-top:10px" data-act="riderDelivered" data-id="${o.id}" data-cod="${cod ? 1 : 0}">✓ Delivered</button>`
+    : `<button class="btn primary lg block" style="margin-top:10px" data-act="riderStart" data-id="${o.id}" ${o.status === 'ready' ? '' : 'disabled'}>${o.status === 'ready' ? '🛵 Picked up — start delivery' : 'Wait — order is being packed'}</button>`}
+  </div>`;
+}
+
+// ---------- staff management (owner / admin) ----------
+async function renderStaff() {
+  S.staff = await Api.get('/api/users');
+  if (!S.orders.length) S.orders = await Api.get('/api/orders');
+  const today = new Date().toDateString();
+  const did = (u, test) => S.orders.reduce((n, o) => n + o.history.filter(h => h.by && h.by.id === u.id && new Date(h.at).toDateString() === today && test(h)).length, 0);
+  const order = ['admin', 'owner', 'manager', 'cashier', 'delivery'];
+  const list = S.staff.slice().sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role) || a.name.localeCompare(b.name));
+  app().innerHTML = adminShell('staff', `
+    <div class="row wrap" style="margin:16px 0"><h2 style="margin:0">Staff <span class="muted" style="font-weight:500">(${S.staff.length})</span></h2><span class="spacer"></span><button class="btn primary" data-act="editStaff" data-id="">+ Add staff</button></div>
+    <div class="roles-help">${Object.entries(Core.ROLES).map(([k, r]) => `<div><b>${r.emoji} ${esc(r.label)}</b><span class="small muted">${esc(r.about)}</span></div>`).join('')}</div>
+    <div style="overflow-x:auto;margin-top:14px"><table class="ptable"><thead><tr><th>Name</th><th>Role</th><th>Login</th><th>Today</th><th>Active</th><th></th></tr></thead><tbody>
+    ${list.map(u => {
+      const stats = u.role === 'delivery' ? `${did(u, h => h.status === 'delivered')} delivered` : u.role === 'cashier' ? `${did(u, h => h.status === 'ready')} packed` : `${did(u, h => h.status === 'accepted')} accepted`;
+      const locked = u.role === 'admin' && S.me.role !== 'admin';
+      return `<tr><td><b>${esc(u.name)}</b>${u.id === S.me.id ? ' <span class="pill">you</span>' : ''}<div class="small muted">${esc(u.phone || '')}</div></td>
+        <td><span class="pill">${Core.ROLES[u.role].emoji} ${esc(roleLabel(u.role))}</span></td><td class="small">${esc(u.username)}</td><td class="small">${stats}</td>
+        <td>${locked || u.id === S.me.id ? (u.active ? 'Yes' : 'No') : `<label class="switch"><input type="checkbox" data-act="staffActive" data-id="${u.id}" ${u.active ? 'checked' : ''}><i></i></label>`}</td>
+        <td>${locked ? '' : `<button class="btn sm" data-act="editStaff" data-id="${u.id}">Edit</button>`}</td></tr>`;
+    }).join('')}</tbody></table></div>
+    <p class="small muted">Each person logs in at <b>${esc(location.origin + location.pathname)}#/admin</b> with their own login name and PIN, and sees only what their role allows. On Android they can tap “Add to Home screen” to keep it like an app.</p>`);
+}
+function staffForm(u) {
+  const isNew = !u; u = u || { name: '', username: '', phone: '', role: 'delivery', active: true };
+  const roles = Object.keys(Core.ROLES).filter(r => r !== 'admin' || S.me.role === 'admin');
+  openModal(`<div class="sheet" data-stop><div class="sheet-body stack">
+    <div class="row"><h2 style="flex:1;margin:0">${isNew ? 'Add staff' : 'Edit ' + esc(u.name)}</h2><button class="icon-btn" data-act="closeModal">✕</button></div>
+    <label class="f"><span>Name *</span><input type="text" id="u-name" value="${esc(u.name)}"></label>
+    <div class="grid2"><label class="f"><span>Login name *</span><input type="text" id="u-user" value="${esc(u.username)}" autocapitalize="none" placeholder="e.g. ramesh"></label>
+    <label class="f"><span>Mobile (customers see it for delivery)</span><input type="tel" id="u-phone" value="${esc(u.phone)}"></label></div>
+    <div><span class="small" style="font-weight:600">Role *</span><div class="opt-list" style="margin-top:6px">${roles.map(r => `<label class="opt ${u.role === r ? 'on' : ''}"><input type="radio" name="u-role" value="${r}" ${u.role === r ? 'checked' : ''} ${u.id === S.me.id ? 'disabled' : ''}><span style="flex:1"><b>${Core.ROLES[r].emoji} ${esc(Core.ROLES[r].label)}</b><br><span class="small muted">${esc(Core.ROLES[r].about)}</span></span></label>`).join('')}</div></div>
+    <label class="f"><span>${isNew ? 'Password / PIN * (4+ characters)' : 'New password / PIN (leave empty to keep)'}</span><input type="text" id="u-pw" autocomplete="off" placeholder="${isNew ? 'e.g. 4-digit PIN' : ''}"></label>
+    <div class="row">${!isNew && u.id !== S.me.id ? `<button class="btn danger" data-act="delStaff" data-id="${u.id}">Remove</button>` : ''}<span class="spacer"></span><button class="btn primary lg" data-act="saveStaff" data-id="${isNew ? '' : u.id}">Save</button></div>
+  </div></div>`);
+  $$('input[name=u-role]').forEach(i => i.onchange = () => $$('.opt').forEach(o => o.classList.toggle('on', $('input', o).checked)));
+}
+
+// ---------- my account (everyone) ----------
+function renderMe() {
+  app().innerHTML = adminShell('me', `<div class="narrow" style="max-width:520px;padding:16px 0">
+    <div class="card stack"><div class="row"><div class="avatar">${Core.ROLES[S.me.role].emoji}</div><div><h2 style="margin:0">${esc(S.me.name)}</h2><div class="muted">${esc(roleLabel(S.me.role))} · login: ${esc(S.me.username)}</div></div></div>
+      <div class="small muted">${esc(Core.ROLES[S.me.role].about)}</div></div>
+    <div class="card stack" style="margin-top:12px"><h3>Change my password / PIN</h3>
+      <label class="f"><span>Current</span><input type="password" id="pw-cur" autocomplete="current-password"></label>
+      <label class="f"><span>New</span><input type="password" id="pw-new" autocomplete="new-password"></label>
+      <button class="btn" data-act="changePw">Change password</button></div>
+    ${'Notification' in window && Notification.permission !== 'granted' ? `<button class="btn block" style="margin-top:12px" data-act="askNotify">🔔 Turn on order alerts</button>` : ''}
+    <button class="btn block lg" style="margin-top:12px" data-act="logout">Log out</button>
+  </div>`);
 }
 
 function printBill(o) {
@@ -921,6 +1127,8 @@ function renderSettings() {
         <label class="f"><span>Packing charge per order (₹)</span><input type="number" id="s-pack" value="${c.packingCharge || 0}" min="0"></label></div>
       ${sw('s-slots-on', c.features && c.features.slots, 'Let customers choose a time slot')}
       <label class="f"><span>Time slots (one per line)</span><textarea id="s-slots">${esc((c.slots || []).join('\n'))}</textarea></label>
+      <label class="f"><span>Google Maps API key (optional)</span><input type="text" id="s-maps" value="${esc(c.mapsKey || '')}" placeholder="Leave empty — maps work without it"></label>
+      <div class="small muted">Live delivery maps work without a key. Add a free “Maps Embed API” key from Google Cloud only if the map ever stops loading.</div>
     </div>
     <div class="card set-section stack"><h3>💳 Payments & GST</h3>
       <div class="row wrap">${['cod', 'upi'].map(p => `<label class="check ${(c.payments || []).includes(p) ? 'on' : ''}"><input type="checkbox" class="s-pay" value="${p}" ${(c.payments || []).includes(p) ? 'checked' : ''}><span>${p === 'cod' ? 'Cash / pay on delivery' : 'UPI'}</span></label>`).join('')}</div>
@@ -945,14 +1153,10 @@ function renderSettings() {
       ${sw('s-mrp', !c.features || c.features.mrp !== false, 'Show MRP discount badges')}
     </div>
     <div class="row" style="position:sticky;bottom:0;background:var(--bg);padding:12px 0"><span class="spacer"></span><button class="btn primary lg" data-act="saveSettings">Save settings</button></div>
-    <div class="card set-section stack"><h3>🔒 Admin password</h3>
-      <div class="grid2"><label class="f"><span>Current password</span><input type="password" id="pw-cur" autocomplete="current-password"></label><label class="f"><span>New password</span><input type="password" id="pw-new" autocomplete="new-password"></label></div>
-      <div class="row"><button class="btn" data-act="changePw">Change password</button><span class="spacer"></span><button class="btn ghost" data-act="logout">Log out</button></div>
-    </div>
     <div class="card set-section stack"><h3>💾 Data</h3>
       <div class="row wrap"><button class="btn" data-act="exportData">Download backup</button>
-      <span class="spacer"></span><button class="btn danger" data-act="resetStore">Start over / change business type…</button></div>
-      <div class="small muted">Starting over deletes all products, orders and settings and opens the setup wizard again.</div>
+      ${can('reset') ? `<span class="spacer"></span><button class="btn danger" data-act="resetStore">Start over / change business type…</button></div>
+      <div class="small muted">Starting over deletes all products, orders, staff and settings and opens the setup wizard again.</div>` : '</div>'}
     </div>
   </div>`);
   $$('.s-mode, .s-pay').forEach(i => i.addEventListener('change', () => i.closest('.check').classList.toggle('on', i.checked)));
@@ -977,7 +1181,7 @@ async function saveSettings(btn) {
     acceptingOrders: ch('#s-accept'), hours: { enabled: ch('#s-hours'), open: v('#s-open'), close: v('#s-close') },
     modes, payments, upiId: v('#s-upi'),
     delivery: { fee: +v('#s-fee') || 0, freeAbove: +v('#s-free') || 0, minOrder: +v('#s-min') || 0, eta: v('#s-eta') },
-    packingCharge: +v('#s-pack') || 0, slots: v('#s-slots').split('\n').map(s => s.trim()).filter(Boolean),
+    packingCharge: +v('#s-pack') || 0, mapsKey: v('#s-maps'), slots: v('#s-slots').split('\n').map(s => s.trim()).filter(Boolean),
     tax: { enabled: ch('#s-tax'), rate: +v('#s-rate') || 0, inclusive: v('#s-incl') === '1', gstin: v('#s-gstin') },
     categories: cats,
     labels: Object.assign({}, S.cfg.labels, { variant: v('#s-l-var') || 'Option', option2: v('#s-l-o2'), addons: v('#s-l-add') || 'Extras', pickup: v('#s-l-pick') || 'Pickup', cta: v('#s-l-cta') || 'Add', products: v('#s-l-prods') }),
@@ -1012,16 +1216,66 @@ const actions = Object.assign({}, wizActions, {
   mode(el) { S.mode = el.dataset.m; S.drawCheckout(); },
   placeOrder(el) { placeOrder(el); },
   async login() {
-    try { const r = await Api.post('/api/login', { password: $('#l-pw').value }); ls.set('sk_token', r.token); route(); }
+    try {
+      const r = await Api.post('/api/login', { username: $('#l-user').value, password: $('#l-pw').value });
+      ls.set('sk_token', r.token); ls.set('sk_user', r.user); ls.set('sk_last_user', r.user.username); S.me = r.user; S.ordersInit = false;
+      go('#/admin/' + homeTab());
+    } catch (e) { toast(e.message, 'bad'); }
+  },
+  demoLogin(el) {
+    const u = el.dataset.u; $('#l-user').value = u;
+    if (u === (Demo.env.db.users.find(x => x.role === 'admin') || {}).username) { $('#l-pw').focus(); return toast('Type the admin password you chose'); }
+    $('#l-pw').value = '1234'; actions.login();
+  },
+  logout() { logout(); go('#/admin'); },
+  refreshDeliveries() { renderDeliveries(); },
+  simDrive() { Tracker.toggleSim(); },
+  async riderStart(el) {
+    el.disabled = true;
+    try { await Api.patch('/api/orders/' + el.dataset.id, { status: 'out' }); toast('Delivery started — sharing your live location', 'ok'); await Tracker.sync(); renderDeliveries(); }
+    catch (e) { toast(e.message, 'bad'); el.disabled = false; }
+  },
+  async riderDelivered(el) {
+    const id = el.dataset.id;
+    if (el.dataset.cod === '1' && !$('#cash-' + id).checked) return toast('Tick “I collected cash” first', 'bad');
+    el.disabled = true;
+    try {
+      if (el.dataset.cod === '1') await Api.patch('/api/orders/' + id, { paid: true });
+      await Api.patch('/api/orders/' + id, { status: 'delivered' });
+      toast('Delivered 🎉', 'ok'); await Tracker.sync(); renderDeliveries();
+    } catch (e) { toast(e.message, 'bad'); el.disabled = false; }
+  },
+  showLog(el) {
+    const o = S.orders.find(x => x.id === el.dataset.id);
+    openModal(`<div class="sheet" data-stop><div class="sheet-body"><div class="row"><h2 style="flex:1;margin:0">Order #${o.number} activity</h2><button class="icon-btn" data-act="closeModal">✕</button></div>${activityHtml(o)}</div></div>`);
+  },
+  editStaff(el) { staffForm(el.dataset.id ? S.staff.find(u => u.id === el.dataset.id) : null); },
+  async saveStaff(el) {
+    const id = el.dataset.id;
+    const roleIn = $('input[name=u-role]:checked');
+    const body = { name: $('#u-name').value.trim(), username: $('#u-user').value.trim(), phone: $('#u-phone').value.trim(), role: roleIn ? roleIn.value : undefined };
+    const pw = $('#u-pw').value.trim(); if (pw || !id) body.password = pw;
+    if (id && id === S.me.id) delete body.role;
+    try { if (id) await Api.put('/api/users/' + id, body); else await Api.post('/api/users', body); closeModal(); toast('Saved', 'ok'); renderStaff(); }
     catch (e) { toast(e.message, 'bad'); }
   },
-  logout() { ls.del('sk_token'); if (events) { events.close(); events = null; } go('#/'); },
+  async delStaff(el) { if (!confirm('Remove this staff member?')) return; try { await Api.del('/api/users/' + el.dataset.id); closeModal(); renderStaff(); } catch (e) { toast(e.message, 'bad'); } },
+  async staffActive(el) { try { await Api.put('/api/users/' + el.dataset.id, { active: el.checked }); toast(el.checked ? 'Account switched on' : 'Account switched off — they are logged out'); } catch (e) { toast(e.message, 'bad'); el.checked = !el.checked; } },
+  async useMyLocation(el) {
+    if (!navigator.geolocation) return toast('Location not available on this device', 'bad');
+    el.disabled = true; el.textContent = 'Finding you…';
+    navigator.geolocation.getCurrentPosition(p => {
+      S.form = S.form || {}; S.form.geo = { lat: p.coords.latitude, lng: p.coords.longitude };
+      S.drawCheckout(); toast('Location added — the delivery boy will navigate straight to you', 'ok');
+    }, err => { el.disabled = false; el.textContent = '📍 Use my current location'; toast(err.code === 1 ? 'Location permission was denied' : 'Could not get your location', 'bad'); }, { enableHighAccuracy: true, timeout: 15000 });
+  },
+  clearGeo() { S.form.geo = null; S.drawCheckout(); },
   ofilter(el) { S.orderFilter = el.dataset.f; renderAdminOrders(); },
   refreshOrders() { renderAdminOrders(); },
-  askNotify() { Notification.requestPermission().then(() => renderAdminOrders()); },
+  askNotify() { Notification.requestPermission().then(() => route()); },
   async setStatus(el) { el.disabled = true; try { await Api.patch('/api/orders/' + el.dataset.id, { status: el.dataset.s }); renderAdminOrders(); } catch (e) { toast(e.message, 'bad'); el.disabled = false; } },
-  async cancelOrder(el) { if (!confirm('Cancel this order?')) return; await Api.patch('/api/orders/' + el.dataset.id, { status: 'cancelled' }); renderAdminOrders(); },
-  async togglePaid(el) { const o = S.orders.find(x => x.id === el.dataset.id); await Api.patch('/api/orders/' + o.id, { paid: !o.paid }); renderAdminOrders(); },
+  async cancelOrder(el) { if (!confirm('Cancel this order?')) return; try { await Api.patch('/api/orders/' + el.dataset.id, { status: 'cancelled' }); renderAdminOrders(); } catch (e) { toast(e.message, 'bad'); } },
+  async togglePaid(el) { const o = S.orders.find(x => x.id === el.dataset.id); try { await Api.patch('/api/orders/' + o.id, { paid: !o.paid }); renderAdminOrders(); } catch (e) { toast(e.message, 'bad'); } },
   printBill(el) { printBill(S.orders.find(x => x.id === el.dataset.id)); },
   async stockToggle(el) { const p = S.products.find(x => x.id === el.dataset.id); await Api.put('/api/products/' + p.id, Object.assign({}, p, { inStock: el.checked, stock: el.checked && p.stock === 0 ? null : p.stock })); toast(el.checked ? 'Back in stock' : 'Marked out of stock'); S.products = await Api.get('/api/products'); },
   addRow(el) { $('#' + el.dataset.t).insertAdjacentHTML('beforeend', rowHtml({}, el.dataset.p === '1', el.dataset.s === '1')); $(`#${el.dataset.t} .r:last-child .rn`).focus(); },
@@ -1043,7 +1297,7 @@ const actions = Object.assign({}, wizActions, {
   catDel(el) { const r = el.closest('.cat-row'); const n = $('input', r).value; if (S.products.some(p => p.category === n) && !confirm(`Some items are in “${n}”. They'll show under “Other”. Remove anyway?`)) return; r.remove(); },
   saveSettings(el) { saveSettings(el); },
   async changePw() {
-    try { const r = await Api.post('/api/password', { current: $('#pw-cur').value, next: $('#pw-new').value }); ls.set('sk_token', r.token); toast('Password changed', 'ok'); $('#pw-cur').value = $('#pw-new').value = ''; }
+    try { const r = await Api.post('/api/password', { current: $('#pw-cur').value, next: $('#pw-new').value }); ls.set('sk_token', r.token); ls.set('sk_user', r.user); toast('Password changed', 'ok'); $('#pw-cur').value = $('#pw-new').value = ''; }
     catch (e) { toast(e.message, 'bad'); }
   },
   async exportData() {
@@ -1054,7 +1308,7 @@ const actions = Object.assign({}, wizActions, {
   async resetStore() {
     const pw = prompt('This deletes ALL products, orders and settings.\nType your admin password to confirm:');
     if (!pw) return;
-    try { await Api.post('/api/reset', { password: pw }); ls.del('sk_token'); S.cart = []; saveCart(); await loadStore(); go('#/'); }
+    try { await Api.post('/api/reset', { password: pw }); logout(); S.cart = []; saveCart(); await loadStore(); go('#/'); }
     catch (e) { toast(e.message, 'bad'); }
   },
 });
@@ -1071,6 +1325,13 @@ document.addEventListener('click', e => {
   if (el.type !== 'checkbox') e.preventDefault();
   e.stopPropagation();
   fn(el, e);
+});
+
+document.addEventListener('change', async e => {
+  const sel = e.target.closest('select[data-assign]');
+  if (!sel) return;
+  try { await Api.patch('/api/orders/' + sel.dataset.assign, { assignTo: sel.value }); toast(sel.value ? `Assigned to ${sel.options[sel.selectedIndex].text.replace(/ \(.*/, '')}` : 'Delivery boy removed', 'ok'); renderAdminOrders(); }
+  catch (err) { toast(err.message, 'bad'); renderAdminOrders(); }
 });
 
 // ================= boot =================
