@@ -1,0 +1,17 @@
+{
+  "name": "StoreKart",
+  "kind": "node",
+  "source": "..",
+  "script": "server.js",
+  "runtimeExe": "StoreKart-Server.exe",
+  "port": 3080,
+  "health": "/api/health",
+  "open": "/#/admin",
+  "kiosk": "/#/kiosk",
+  "texts": {
+    "local": "Your shop runs on this computer: products, orders and settings are saved here. Phones on the same Wi-Fi can open it. For customers ordering from home, this computer has to stay on and be reachable through a Cloudflare Tunnel.",
+    "remote": "Use this when StoreKart already runs on your server (for example Unraid with Cloudflare Tunnel). This computer opens the staff screens, the sales counter or the self-order screen.",
+    "example": "https://shop.yourdomain.com",
+    "remoteHint": "Your store's web address, e.g. https://shop.yourdomain.com or http://192.168.1.10:3080"
+  }
+}

@@ -1,0 +1,87 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+    paths: ["server.js", "dukaan.js", "package.json", "public/**", "windows/**", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install build tools
+        run: python -m pip install --disable-pip-version-check pyinstaller pystray pillow
+
+      - name: Build the app
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          STORE_URL: ${{ secrets.STORE_URL }}
+          STORE_NAME: ${{ vars.STORE_NAME }}
+        run: |
+          python windows/build.py *>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE) { exit 1 }
+          $v = (Select-String -Path build.log -Pattern '^VERSION=(.+)$').Matches[0].Groups[1].Value
+          "APP_VERSION=$v" >> $env:GITHUB_ENV
+
+      - name: Check the app starts
+        run: |
+          $p = Start-Process "dist\StoreKart\StoreKart.exe" -ArgumentList '--selftest' -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\StoreKart\app.log" -Tail 20
+          if ($p.ExitCode -ne 0) { Write-Error "Self test failed"; exit 1 }
+
+      - name: Make the installer
+        env:
+          STORE_NAME: ${{ vars.STORE_NAME }}
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $title = if ($env:STORE_NAME) { $env:STORE_NAME } else { "StoreKart" }
+          & $iscc /Qp "/DAppName=StoreKart" "/DAppTitle=$title" "/DAppVersion=$env:APP_VERSION" "/DAppId={{71edd7b3-e205-4e66-b888-deeb5b55ae65}" "/DServerExe=StoreKart-Server.exe" "/DServerPath=runtime\StoreKart-Server.exe" "/DKiosk=1" windows\installer.iss
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Test the installer
+        run: |
+          $p = Start-Process "dist\StoreKart-Setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode) { Write-Error "Installer failed: $($p.ExitCode)"; exit 1 }
+          $p = Start-Process "$env:ProgramFiles\StoreKart\StoreKart.exe" -ArgumentList '--selftest' -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\StoreKart\app.log" -Tail 5
+          if ($p.ExitCode -ne 0) { Write-Error "Installed app failed its self test"; exit 1 }
+          Get-NetFirewallRule -DisplayName "StoreKart" | Format-Table DisplayName, Enabled, Direction, Action
+          $p = Start-Process "$env:ProgramFiles\StoreKart\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
+          if (Test-Path "$env:ProgramFiles\StoreKart\StoreKart.exe") { Write-Error "Uninstall left the app behind"; exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StoreKart-Windows
+          path: dist/StoreKart-Setup.exe
+
+      - name: Publish to the windows-latest release
+        if: ${{ vars.PUBLISH_APKS != 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "Windows installer for StoreKart, built from $env:GITHUB_SHA. Download StoreKart-Setup.exe and run it. If Windows shows 'Windows protected your PC', click More info, then Run anyway."
+          gh release view windows-latest *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit windows-latest --title "Windows app (build $env:GITHUB_RUN_NUMBER)" --notes "$notes" --prerelease
+          } else {
+            gh release create windows-latest --title "Windows app (build $env:GITHUB_RUN_NUMBER)" --notes "$notes" --prerelease --latest=false
+          }
+          gh release upload windows-latest "dist/StoreKart-Setup.exe" --clobber
+          if ($LASTEXITCODE) { exit 1 }

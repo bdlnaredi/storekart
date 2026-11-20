@@ -105,6 +105,16 @@ If you also run **Dukaan** (the counter billing app that sends bills to TallyPri
 ## Android apps
 The `android/` folder builds two apps: a **customer app** (the shop) and a **staff app** (orders, counter, cash, and deliveries with live location that keeps working with the screen off). Your store's address and name are built in from your GitHub settings (secret `STORE_URL`, variable `STORE_NAME`), so they're never in this public code and nobody has to type them. GitHub builds both APKs automatically. See `android/README.md` for the one-time setup.
 
+## Windows app
+Download **StoreKart-Setup.exe** from [Releases → Windows app](../../releases/tag/windows-latest) and run it. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**. The first time it opens, choose one:
+- **Open my StoreKart server.** For when the store runs on Unraid. This PC gets the staff screens (orders, sales counter, cash) in their own window. If the `STORE_URL` secret is set (see `android/README.md`), the address is filled in already.
+- **Run StoreKart on this computer.** For when there's no server. The shop runs on the PC itself:
+  - Data is kept in `%LOCALAPPDATA%\StoreKart\data`.
+  - A taskbar icon keeps it running and can start it with Windows. That icon also shows the address and QR code for phones on the same Wi-Fi.
+  - For customers ordering from home, this PC must stay on and be reachable through a Cloudflare Tunnel.
+
+The Start menu also has **StoreKart self-order screen**, which opens the customer self-order screen full screen for an in-store touch screen (Alt+F4 closes it), and **StoreKart - change setup**.
+
 ## Run it on Unraid
 
 **Option A — Docker Compose (Compose Manager plugin)**

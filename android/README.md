@@ -31,7 +31,7 @@ In your repository, go to **Settings → Secrets and variables → Actions**:
    5. Keep `storekart.jks` safe: every future update must be signed with it.
 4. Optional:
    - variable `STORE_APP_ID` (e.g. `com.ganeshkirana.shop`), needed only for the Play Store;
-   - variable `PUBLISH_APKS` = `false` if you don't want the APKs on the public Releases page.
+   - variable `PUBLISH_APKS` = `false` if you don't want the APKs (or the Windows installer) on the public Releases page.
 
 Then, on GitHub, go to **Actions → Build Android apps → Run workflow**. It also runs by itself whenever the app code changes.
 
