@@ -1,0 +1,12 @@
+services:
+  storekart:
+    build: .
+    container_name: storekart
+    ports:
+      - "3080:3080"
+    volumes:
+      # On Unraid: /mnt/user/appdata/storekart
+      - ./data:/data
+    environment:
+      - TZ=Asia/Kolkata
+    restart: unless-stopped

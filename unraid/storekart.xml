@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>StoreKart</Name>
+  <Repository>ghcr.io/bdlnaredi/storekart:latest</Repository>
+  <Registry>https://github.com/bdlnaredi/storekart/pkgs/container/storekart</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/bdlnaredi/storekart/issues</Support>
+  <Project>https://github.com/bdlnaredi/storekart</Project>
+  <Overview>Online store for any shop — fast food, clothing, grocery, bakery, electronics. Pick the business type on first run. Customer storefront, cart, checkout (COD / UPI), WhatsApp order, live order tracking, and an admin panel with new-order alerts.</Overview>
+  <Category>Productivity: Tools:</Category>
+  <WebUI>http://[IP]:[PORT:3080]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/bdlnaredi/storekart/main/public/icon.svg</Icon>
+  <Config Name="Web port" Target="3080" Default="3080" Mode="tcp" Description="Store web page port" Type="Port" Display="always" Required="true" Mask="false">3080</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/storekart" Mode="rw" Description="Products, orders, settings and photos" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/storekart</Config>
+  <Config Name="Timezone" Target="TZ" Default="Asia/Kolkata" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="false">Asia/Kolkata</Config>
+</Container>
