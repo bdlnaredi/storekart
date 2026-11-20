@@ -34,7 +34,7 @@ const env = {
     fs.writeFileSync(path.join(UPLOAD_DIR, name), Buffer.from(m[2], 'base64'));
     return `/uploads/${name}`;
   },
-  emit(event, data) { broadcast(event, data); },
+  emit(event, data) { broadcast(event, data); if (event === 'order' || event === 'update') setImmediate(() => link.onOrderEvent(event, data)); },
 };
 
 function loadDb() {
@@ -58,6 +58,8 @@ function saveSoon() { if (!saveTimer) saveTimer = setTimeout(saveNow, 300); }
 saveNow();
 
 const core = Core.createCore(env);
+// optional link with Dukaan (counter billing + Tally); does nothing until switched on in Settings
+const link = require('./dukaan.js')(env, core, Core);
 
 function userIdFromToken(tok) {
   if (!tok) return null;
@@ -148,6 +150,22 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // link with Dukaan: Dukaan calls with the link key; the owner's Settings screen calls with a sign-in
+    if (p.startsWith('/api/link/')) {
+      const body = req.method === 'POST' ? await readBody(req) : {};
+      const key = req.headers['x-link-key'];
+      if (key != null) {
+        if (!link.keyOk(String(key))) return send(res, 401, { error: 'The link key isn\'t right, or the Dukaan link is off in StoreKart.' });
+        return send(res, 200, await link.fromDukaan(p, body));
+      }
+      const u = userId && env.db.users.find(x => x.id === userId);
+      if (!u) return send(res, 401, { error: 'Please log in again.' });
+      const okRole = p === '/api/link/items' ? Core.can(u, 'products') : Core.can(u, 'settings');
+      if (!okRole) return send(res, 403, { error: 'Only the owner or admin can change the Dukaan link.' });
+      if (p === '/api/link/items') body.force = url.searchParams.get('force') === '1';
+      return send(res, 200, await link.adminRoute(p, req.method, body));
+    }
+
     const ip = req.socket.remoteAddress;
     if (p === '/api/login') {
       const r = loginFails.get(ip);
@@ -159,7 +177,14 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/login') loginFails.delete(ip);
       return send(res, req.method === 'POST' && (p === '/api/orders' || p === '/api/products' || p === '/api/users') ? 201 : 200, out);
     } catch (e) {
-      if (p === '/api/login' && e.status === 401) { const r = loginFails.get(ip) || { count: 0 }; loginFails.set(ip, { count: r.count + 1, at: Date.now() }); }
+      // not a StoreKart login: if linked, it may be a Dukaan cashier's name + PIN (or the Dukaan owner)
+      if (p === '/api/login' && e.status === 401) {
+        try {
+          const u = await link.loginViaDukaan(String(body.username || ''), String(body.password || ''));
+          if (u) { loginFails.delete(ip); return send(res, 200, { token: env.makeToken(u), user: core.publicUser(u) }); }
+        } catch (e2) { if (e2.local) throw e2; } // Dukaan said no (or is down): it's simply a wrong login
+        const r = loginFails.get(ip) || { count: 0 }; loginFails.set(ip, { count: r.count + 1, at: Date.now() });
+      }
       throw e;
     }
   } catch (e) {

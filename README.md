@@ -83,6 +83,25 @@ Everyone can see exactly who is holding the shop's cash:
 - **Privacy**: customers never see staff names. Their activity log says "Order accepted", "Packed & ready" and so on, and only the delivery boy's name and phone are shown. Staff still see who did what.
 - **FSSAI licence number** (Settings → Store) is printed on every bill and shown in the store footer.
 
+## Link with Dukaan (counter billing + Tally)
+If you also run **Dukaan** (the counter billing app that sends bills to TallyPrime), the two can work as one shop. Linking is optional: switched off (or with Dukaan down), StoreKart works on its own as usual.
+
+**Connect:**
+1. In Dukaan, go to Settings → **Online store link** and tick *Link with the online store*. Enter StoreKart's address and **Save**. That gives you the **link key**.
+2. In StoreKart, go to Settings → **Connect Dukaan**. Enter Dukaan's address and paste the key, then **Save & connect**.
+3. Click **Import Dukaan items…** (they arrive with Dukaan's price, MRP, GST rate, HSN and stock), or **Match items by name**. You can also pick the Dukaan item on any product. With pack sizes, use "counts as": a 5 kg pack of a per-kg item counts as 5.
+
+**What happens then:**
+- **Stock:** StoreKart shows Dukaan's live stock (refreshed every minute) and won't sell more than is there.
+- **Order placed:** its items are **put aside in Dukaan** straight away, so the counter can't sell them twice.
+- **Order completed and paid:** it becomes a **Dukaan bill** in series **W** (W/2627/1 …). The bill goes into Tally like any counter bill, and the customer earns loyalty points on their mobile number. Staff see "Billed in Dukaan as W/…" on the order.
+- **Order cancelled:** the stock goes back, or the Dukaan bill is cancelled if it was already made.
+- **Charges:** delivery and packing charges stay in StoreKart, because Dukaan bills only stock items.
+- **Logins work both ways:**
+  - StoreKart owner/admin sign in to Dukaan as the owner; managers and cashiers as cashiers. Delivery boys can't use the Dukaan counter.
+  - Dukaan cashiers sign in to StoreKart with their name + PIN and become StoreKart cashiers. The Dukaan owner signs in with login name `owner` and the owner password.
+- **Dukaan down:** anything for Dukaan waits in a queue (shown in Settings) and is sent once it's back.
+
 ## Android app
 The `android/` folder is an Android Studio project. It gives delivery boys **live location that keeps working with the screen off**, phone notifications for order alerts, and a **📍 GPS & phone test** screen. GitHub builds the APK automatically: on your phone, open Releases → *StoreKart Android (latest)*. See `android/README.md`.
 

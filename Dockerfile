@@ -1,6 +1,6 @@
 FROM node:22-alpine
 WORKDIR /app
-COPY server.js package.json ./
+COPY server.js dukaan.js package.json ./
 COPY public ./public
 ENV PORT=3080 DATA_DIR=/data NODE_ENV=production
 VOLUME /data

@@ -151,6 +151,7 @@ function createCore(env) {
   const db = () => env.db;
   const nowIso = () => new Date().toISOString();
 
+  const cleanLink = l => l && str(l.item, 120) ? { item: str(l.item, 120), factor: num(l.factor, 1) > 0 ? Math.round(num(l.factor, 1) * 1000) / 1000 : 1 } : null;
   function cleanProduct(p, existing = {}) {
     return {
       id: existing.id || env.id(),
@@ -166,7 +167,8 @@ function createCore(env) {
       stock: p.stock === '' || p.stock == null ? null : Math.max(0, Math.floor(num(p.stock))),
       featured: !!p.featured,
       veg: p.veg === true ? true : p.veg === false ? false : null,
-      variants: Array.isArray(p.variants) ? p.variants.slice(0, 30).map(v => ({ name: str(v.name, 40), price: money(v.price), inStock: v.inStock !== false })).filter(v => v.name) : [],
+      variants: Array.isArray(p.variants) ? p.variants.slice(0, 30).map(v => ({ name: str(v.name, 40), price: money(v.price), inStock: v.inStock !== false, link: cleanLink(v.link) })).filter(v => v.name) : [],
+      link: cleanLink(p.link), // Dukaan item this product is (when the two apps are linked)
       options2: Array.isArray(p.options2) ? p.options2.map(o => str(o, 40)).filter(Boolean).slice(0, 30) : [],
       addons: Array.isArray(p.addons) ? p.addons.slice(0, 30).map(a => ({ name: str(a.name, 40), price: money(a.price) })).filter(a => a.name) : [],
       gstRate: p.gstRate === '' || p.gstRate == null ? null : Math.min(40, Math.max(0, num(p.gstRate))), // null = store default
@@ -177,7 +179,7 @@ function createCore(env) {
     };
   }
 
-  const publicUser = u => u && ({ id: u.id, name: u.name, username: u.username, phone: u.phone || '', role: u.role, active: u.active !== false, createdAt: u.createdAt });
+  const publicUser = u => u && ({ id: u.id, name: u.name, username: u.username, phone: u.phone || '', role: u.role, active: u.active !== false, createdAt: u.createdAt, fromDukaan: !!u.ext });
 
   function makeUser(b, existing) {
     const u = existing || { id: env.id(), createdAt: nowIso(), active: true };
@@ -211,9 +213,9 @@ function createCore(env) {
 
   // what a customer is allowed to see about an order
   function publicOrder(o) {
-    const { adminNote, ...rest } = o;
+    const { adminNote, dk, ...rest } = o;
     return Object.assign({}, rest, {
-      history: o.history.map(h => ({ status: h.status, at: h.at, text: h.pub || customerText(h.text) })),
+      history: o.history.filter(h => !h.staffOnly).map(h => ({ status: h.status, at: h.at, text: h.pub || customerText(h.text) })),
       assignedTo: o.assignedTo ? { name: o.assignedTo.name, phone: o.assignedTo.phone } : null,
       trail: (o.trail || []).slice(-150),
     });

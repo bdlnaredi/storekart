@@ -1113,7 +1113,7 @@ async function renderStaff() {
     ${list.map(u => {
       const stats = u.role === 'delivery' ? `${did(u, h => h.status === 'delivered')} delivered` : u.role === 'cashier' ? `${did(u, h => h.status === 'ready')} packed` : `${did(u, h => h.status === 'accepted')} accepted`;
       const locked = u.role === 'admin' && S.me.role !== 'admin';
-      return `<tr><td><b>${esc(u.name)}</b>${u.id === S.me.id ? ' <span class="pill">you</span>' : ''}<div class="small muted">${esc(u.phone || '')}</div></td>
+      return `<tr><td><b>${esc(u.name)}</b>${u.id === S.me.id ? ' <span class="pill">you</span>' : ''}${u.fromDukaan ? ' <span class="pill brand" title="Signs in with their Dukaan name and PIN">🔗 Dukaan login</span>' : ''}<div class="small muted">${esc(u.phone || '')}</div></td>
         <td><span class="pill">${Core.ROLES[u.role].emoji} ${esc(roleLabel(u.role))}</span></td><td class="small">${esc(u.username)}</td><td class="small">${stats}</td>
         <td>${locked || u.id === S.me.id ? (u.active ? 'Yes' : 'No') : `<label class="switch"><input type="checkbox" data-act="staffActive" data-id="${u.id}" ${u.active ? 'checked' : ''}><i></i></label>`}</td>
         <td>${locked ? '' : `<button class="btn sm" data-act="editStaff" data-id="${u.id}">Edit</button>`}</td></tr>`;
@@ -1191,7 +1191,7 @@ async function renderAdminProducts() {
     ${list.length ? `<div style="overflow-x:auto"><table class="ptable"><thead><tr><th></th><th>Name</th><th>Category</th><th>Price</th><th>In stock</th><th></th></tr></thead><tbody>
     ${list.map(p => `<tr>
       <td style="width:56px"><div class="thumb" style="width:44px;height:44px;font-size:22px">${imgOrEmoji(p)}</div></td>
-      <td><b>${esc(p.name)}</b>${p.featured ? ' <span class="pill brand">⭐</span>' : ''}${c.features && c.features.veg && p.veg != null ? ` <span class="veg-dot ${p.veg ? '' : 'nv'}"></span>` : ''}<div class="small muted">${p.variants && p.variants.length ? esc(p.variants.map(v => v.name).join(', ')) : esc(p.unit || '')}${p.stock != null ? ` · ${p.stock} left` : ''}</div></td>
+      <td><b>${esc(p.name)}</b>${p.featured ? ' <span class="pill brand">⭐</span>' : ''}${c.features && c.features.veg && p.veg != null ? ` <span class="veg-dot ${p.veg ? '' : 'nv'}"></span>` : ''}<div class="small muted">${p.variants && p.variants.length ? esc(p.variants.map(v => v.name).join(', ')) : esc(p.unit || '')}${p.stock != null ? ` · ${p.stock} left` : ''}${p.link && p.link.item ? ` · <span class="pill brand">🔗 Dukaan${p.dkStock != null ? ': ' + p.dkStock : ''}</span>` : (p.variants || []).some(v => v.link && v.link.item) ? ' · <span class="pill brand">🔗 Dukaan</span>' : ''}</div></td>
       <td class="small">${esc(p.category)}</td>
       <td>${rupee(fromPrice(p))}${p.mrp ? `<div class="mrp" style="margin:0">${rupee(p.mrp)}</div>` : ''}</td>
       <td><label class="switch"><input type="checkbox" data-act="stockToggle" data-id="${p.id}" ${p.inStock ? 'checked' : ''}><i></i></label></td>
@@ -1245,6 +1245,13 @@ function renderProductForm(pid) {
         <label class="row">Stock qty <input type="number" id="p-stock" value="${p.stock ?? ''}" min="0" placeholder="Unlimited" style="width:110px"></label>
       </div>
     </div>
+    <div class="card hidden" id="dk-card" style="margin-top:12px"><h3>🔗 Dukaan item</h3>
+      <p class="small muted" style="margin-top:0">Which Dukaan item this is. Its stock comes from Dukaan, and online sales come off it. “Counts as” is how many Dukaan units one of these is (e.g. a 2 kg pack of a per-kg item = 2).</p>
+      <datalist id="dk-items"></datalist>
+      ${(p.variants && p.variants.length > 1 ? p.variants : [null]).map(v => { const l = (v ? v.link : p.link) || {}; return `<div class="dk-row">${v ? `<b>${esc(v.name)}</b>` : ''}
+        <input type="text" class="dk-item" data-v="${v ? esc(v.name) : ''}" list="dk-items" value="${esc(l.item || '')}" placeholder="Type to search Dukaan items — empty = not linked">
+        <label class="small">Counts as <input type="number" class="dk-factor" value="${l.factor || 1}" min="0.001" step="0.001" style="width:80px"></label></div>`; }).join('')}
+      <div class="small muted" id="dk-note"></div></div>
     <div class="card" style="margin-top:12px"><h3>🧾 GST</h3>
       ${c.tax && c.tax.enabled ? '' : `<p class="small" style="margin-top:0;color:var(--warn)">GST is switched off for the store (Settings → Payments & GST). These are saved and used once you switch it on.</p>`}
       <div class="grid3">
@@ -1274,6 +1281,15 @@ function renderProductForm(pid) {
       : `Customer pays <b>${rupee(price + g.gst)}</b> — ${rupee(price)} + CGST ${rupee(g.cgst)} + SGST ${rupee(g.sgst)}`;
   };
   ['#p-price', '#p-gst', '#p-incl'].forEach(id => $(id).addEventListener('input', gstEg)); gstEg();
+  // Dukaan link (only shown when the apps are linked)
+  if (!Api.demo) Api.get('/api/link/items').then(r => {
+    if (!r.on || !$('#dk-card')) return;
+    $('#dk-card').classList.remove('hidden');
+    S.dkItems = r.items;
+    $('#dk-items').innerHTML = r.items.map(i => `<option value="${esc(i.name)}">${esc(i.group || '')} · stock ${i.stock} ${esc(i.unit || '')} · ₹${(i.price / 100).toFixed(2)}</option>`).join('');
+    const note = () => { const bad = $$('.dk-item').filter(x => x.value && !r.items.some(i => i.name === x.value)); $('#dk-note').innerHTML = bad.length ? `<span style="color:var(--bad)">“${esc(bad[0].value)}” isn't a Dukaan item — pick one from the list.</span>` : ''; };
+    $$('.dk-item').forEach(x => x.addEventListener('input', note)); note();
+  }).catch(() => {});
   $('#img-pick').onclick = () => $('#img-file').click();
   $('#img-file').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -1298,6 +1314,15 @@ function resizeImage(file, max) {
     img.src = url;
   });
 }
+// read the Dukaan item boxes: { link } for a plain product, or links on each pack size
+function dkLinks() {
+  const card = $('#dk-card'); if (!card || card.classList.contains('hidden')) return {};
+  const rows = $$('.dk-row', card).map(r => ({ v: $('.dk-item', r).dataset.v, item: $('.dk-item', r).value.trim(), factor: +$('.dk-factor', r).value || 1 }));
+  const bad = rows.find(x => x.item && S.dkItems && !S.dkItems.some(i => i.name === x.item));
+  if (bad) throw new Error(`“${bad.item}” isn't a Dukaan item`);
+  if (rows.length === 1 && !rows[0].v) return { link: rows[0].item ? { item: rows[0].item, factor: rows[0].factor } : null };
+  return { variantLinks: Object.fromEntries(rows.map(x => [x.v, x.item ? { item: x.item, factor: x.factor } : null])) };
+}
 async function saveProduct(btn) {
   const name = $('#p-name').value.trim();
   if (!name) return toast('Please enter a name', 'bad');
@@ -1306,11 +1331,19 @@ async function saveProduct(btn) {
   if (!price && !variants.length) return toast('Please enter a price', 'bad');
   const vegSel = $('#p-veg') ? $('#p-veg').value : '';
   const stockV = $('#p-stock').value;
+  let links;
+  try { links = dkLinks(); } catch (e) { return toast(e.message, 'bad'); }
+  const old = btn.dataset.id ? S.products.find(p => p.id === btn.dataset.id) : null;
+  if (!links.link && !links.variantLinks && old) { // link box not shown (link off): keep what was saved
+    links = { link: old.link || null, variantLinks: Object.fromEntries((old.variants || []).map(v => [v.name, v.link || null])) };
+  }
+  if (links.variantLinks) for (const v of variants) v.link = links.variantLinks[v.name] || null;
   const body = {
     name, category: $('#p-cat').value, price, mrp: +$('#p-mrp').value || null, unit: $('#p-unit').value.trim(), description: $('#p-desc').value.trim(),
     emoji: $('#p-emoji').value.trim(), image: S.editImage, inStock: $('#p-instock').checked, featured: $('#p-feat').checked,
     veg: vegSel === 'veg' ? true : vegSel === 'nonveg' ? false : null, stock: stockV === '' ? null : +stockV,
     variants, options2: $('#p-opt2').value.split(',').map(s => s.trim()).filter(Boolean),
+    link: links.link || null,
     gstRate: $('#p-gst').value === '' ? null : +$('#p-gst').value, hsn: $('#p-hsn').value.trim(), taxInclusive: $('#p-incl').value === 'yes' ? true : $('#p-incl').value === 'no' ? false : null, addons: readRows('a-rows').map(({ name, price }) => ({ name, price })),
   };
   btn.disabled = true;
@@ -1355,6 +1388,7 @@ function renderSettings() {
       <label class="f"><span>Google Maps API key (optional)</span><input type="text" id="s-maps" value="${esc(c.mapsKey || '')}" placeholder="Leave empty — maps work without it"></label>
       <div class="small muted">Live delivery maps work without a key. Add a free “Maps Embed API” key from Google Cloud only if the map ever stops loading.</div>
     </div>
+    <div class="card set-section stack" id="dk-settings"><h3>🔗 Connect Dukaan (counter billing & Tally)</h3><div class="small muted">Loading…</div></div>
     <div class="card set-section stack"><h3>🖥️ In-store screens</h3>
       ${sw('s-kiosk', k.enabled, 'Self-order screen for customers (tablet / TV at the shop)')}
       ${sw('s-kiosk-auto', k.autoAccept !== false, 'Send self-order screen orders straight to packing (skip manager accept)')}
@@ -1406,6 +1440,27 @@ function renderSettings() {
     try { const r = await Api.post('/api/upload', { dataUrl: await resizeImage(f, 400) }); await Api.put('/api/config', { logoImage: r.url }); S.cfg = await Api.get('/api/config'); renderSettings(); toast('Logo updated', 'ok'); } catch (err) { toast(err.message, 'bad'); }
   };
   S.pendingColor = c.color;
+  dukaanCard();
+}
+
+// ---- Connect Dukaan (owner / admin) ----
+async function dukaanCard() {
+  const box = $('#dk-settings'); if (!box) return;
+  if (Api.demo) { box.innerHTML = `<h3>🔗 Connect Dukaan (counter billing & Tally)</h3><div class="small muted">Linking with Dukaan works on your own StoreKart server — not in this preview.</div>`; return; }
+  let st; try { st = await Api.get('/api/link/settings'); } catch (e) { box.innerHTML = `<h3>🔗 Connect Dukaan</h3><div class="small" style="color:var(--bad)">${esc(e.message)}</div>`; return; }
+  const ago = t => t ? timeAgo(new Date(t).toISOString()) : 'never';
+  box.innerHTML = `<h3>🔗 Connect Dukaan (counter billing & Tally)</h3>
+    <div class="small muted">When linked: products show Dukaan's live stock, online orders put their items aside in Dukaan as soon as they're placed, and become Dukaan bills (then go to Tally) once completed and paid. Staff can sign in to either app with either login. Switched off, StoreKart works on its own.</div>
+    <label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="dk-on" ${st.enabled ? 'checked' : ''}><i></i></span>Link with Dukaan</label>
+    <div class="grid2"><label class="f"><span>Dukaan address</span><input type="text" id="dk-url" value="${esc(st.url)}" placeholder="http://192.168.1.10:2510 or https://dukaan.yourdomain.com"></label>
+      <label class="f"><span>Link key (from Dukaan → Settings → Online store link)</span><input type="password" id="dk-key" placeholder="${st.hasKey ? '•••• saved (ends ' + esc(st.keyEnd) + ') — paste to change' : 'dk_…'}" autocomplete="off"></label></div>
+    <label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="dk-staff" ${st.staffLogin ? 'checked' : ''}><i></i></span>Staff can sign in with Dukaan's name + PIN (and Dukaan accepts StoreKart logins)</label>
+    <div class="row wrap"><button class="btn primary" data-act="dkSave">Save & connect</button>${st.enabled ? `<button class="btn" data-act="dkMatch">Match items by name</button><button class="btn" data-act="dkImport">Import Dukaan items…</button><button class="btn" data-act="dkSync">Update stock now</button>` : ''}</div>
+    ${st.enabled ? `<div class="dk-status">
+      <div>${st.lastOkAt && Date.now() - st.lastOkAt < 180000 ? '🟢 Connected' : '🟠 Not heard from Dukaan recently'}${st.shop ? ' to <b>' + esc(st.shop) + '</b>' : ''} · stock updated ${ago(st.lastStockAt)} · ${st.linked} product${st.linked === 1 ? '' : 's'}/sizes linked</div>
+      ${st.queue.length ? `<div style="margin-top:6px"><b>${st.queue.length} waiting to send to Dukaan</b> <button class="btn sm" data-act="dkRetry">Retry now</button>
+        ${st.queue.slice(0, 8).map(t => `<div class="small muted">#${t.number} · ${({ reserve: 'put stock aside', release: 'give stock back', sale: 'make the bill', cancel: 'cancel the bill' })[t.kind]}${t.error ? ' — ' + esc(t.error) : ''}</div>`).join('')}</div>` : '<div class="small muted">Nothing waiting to send.</div>'}
+      ${st.lastError && st.queue.length ? `<div class="small" style="color:var(--warn)">Last problem: ${esc(st.lastError)}</div>` : ''}</div>` : ''}`;
 }
 async function saveSettings(btn) {
   const v = id => $(id).value.trim(), ch = id => $(id).checked;
@@ -1699,6 +1754,34 @@ const actions = Object.assign({}, wizActions, {
     const old = document.title; document.title = `Invoice ${invoiceNo(o).replace('/', '-')} - ${S.cfg.name}`;
     if (Native) Native.printPage(); else window.print();
     setTimeout(() => { document.title = old; }, 1000);
+  },
+  // ---- Dukaan link ----
+  async dkSave(el) {
+    el.disabled = true;
+    try {
+      const b = { enabled: $('#dk-on').checked, url: $('#dk-url').value, staffLogin: $('#dk-staff').checked };
+      if ($('#dk-key').value.trim()) b.key = $('#dk-key').value.trim();
+      const st = await Api.post('/api/link/settings', b);
+      toast(st.enabled ? `Connected to Dukaan${st.shop ? ' — ' + st.shop : ''}` : 'Dukaan link switched off', 'ok');
+    } catch (e) { toast(e.message, 'bad'); }
+    el.disabled = false; dukaanCard();
+  },
+  async dkMatch() { try { const r = await Api.post('/api/link/match', {}); toast(`${r.matched} matched by name`, 'ok'); S.products = await Api.get('/api/products'); dukaanCard(); } catch (e) { toast(e.message, 'bad'); } },
+  async dkSync() { try { await Api.post('/api/link/sync', {}); toast('Stock updated from Dukaan', 'ok'); dukaanCard(); } catch (e) { toast(e.message, 'bad'); } },
+  async dkRetry() { try { await Api.post('/api/link/retry', {}); dukaanCard(); } catch (e) { toast(e.message, 'bad'); } },
+  async dkImport() {
+    let r; try { r = await Api.get('/api/link/items?force=1'); } catch (e) { return toast(e.message, 'bad'); }
+    const linked = new Set(); S.products.forEach(p => { if (p.link) linked.add(p.link.item); (p.variants || []).forEach(v => v.link && linked.add(v.link.item)); });
+    const fresh = r.items.filter(i => i.can_sell && !linked.has(i.name));
+    const groups = [...new Set(fresh.map(i => i.group || 'Other'))].sort();
+    openModal(`<div class="sheet" data-stop><div class="sheet-body stack"><div class="row"><h2 style="flex:1;margin:0">Import from Dukaan</h2><button class="icon-btn" data-act="closeModal">✕</button></div>
+      <div class="muted">${fresh.length} Dukaan items aren't in the online store yet. They come in with Dukaan's price, MRP, GST rate and HSN, linked for stock. Pick the groups to bring in:</div>
+      <div class="stack">${groups.map(g => `<label class="check"><input type="checkbox" class="dk-g" value="${esc(g)}" checked><span>${esc(g)} <span class="muted small">(${fresh.filter(i => (i.group || 'Other') === g).length})</span></span></label>`).join('') || '<div class="muted">Nothing new to import.</div>'}</div>
+      <div class="row"><button class="btn" data-act="closeModal">Cancel</button><span class="spacer"></span><button class="btn primary" data-act="dkImportGo" ${fresh.length ? '' : 'disabled'}>Import</button></div></div></div>`);
+  },
+  async dkImportGo() {
+    try { const r = await Api.post('/api/link/import', { groups: $$('.dk-g:checked').map(x => x.value) }); closeModal(); toast(`${r.imported} items imported`, 'ok'); S.cfg = await Api.get('/api/config'); S.products = await Api.get('/api/products'); renderSettings(); }
+    catch (e) { toast(e.message, 'bad'); }
   },
   // ---- cash handover ----
   async cashGive(el) {

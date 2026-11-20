@@ -409,6 +409,11 @@ body.kiosk-mode { overscroll-behavior: none; }
 .big-amt { font-size: 20px; }
 .cash-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .cash-row:last-child { border-bottom: 0; }
+/* ---------- Dukaan link ---------- */
+.dk-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.dk-row b { min-width: 90px; }
+.dk-row .dk-item { flex: 1; min-width: 200px; }
+.dk-status { background: #f6f7f9; border-radius: 10px; padding: 10px 12px; font-size: 14px; }
 #print-area { display: none; }
 @media print {
   body > *:not(#print-area) { display: none !important; }
