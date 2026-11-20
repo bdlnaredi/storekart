@@ -77,6 +77,17 @@ function storeIsOpen(cfg, now = new Date()) {
   return o <= c ? mins >= o && mins <= c : mins >= o || mins <= c;
 }
 
+// GST within the state: CGST and SGST are each (rate ÷ 2)% of the taxable value, rounded separately,
+// so they are always the same. Total GST = CGST + SGST.
+//   price includes GST:  taxable = amount ÷ (1 + rate%)   e.g. ₹104 @5% → CGST 2.48 + SGST 2.48, taxable 99.04
+//   GST added on top:    taxable = amount
+function gstParts(amount, rate, inclusive) {
+  const base = inclusive ? amount * 100 / (100 + rate) : amount;
+  const half = money(base * rate / 200);
+  const gst = money(half * 2);
+  return { cgst: half, sgst: half, gst, taxable: inclusive ? money(amount - gst) : money(amount) };
+}
+
 // Prices are always calculated from the product list, never trusted from the browser.
 function priceCart(cfg, products, items, mode, strict) {
   const lines = [];
@@ -102,8 +113,7 @@ function priceCart(cfg, products, items, mode, strict) {
     if (t.enabled) {
       const rate = p.gstRate != null && p.gstRate !== '' ? num(p.gstRate) : num(t.rate);
       const incl = p.taxInclusive === true || p.taxInclusive === false ? p.taxInclusive : t.inclusive !== false;
-      const gst = incl ? money(line.total * rate / (100 + rate)) : money(line.total * rate / 100);
-      Object.assign(line, { gstRate: rate, taxIncl: incl, gst, taxable: incl ? money(line.total - gst) : line.total });
+      Object.assign(line, { gstRate: rate, taxIncl: incl }, gstParts(line.total, rate, incl));
     }
     lines.push(line);
   }
@@ -118,7 +128,7 @@ function priceCart(cfg, products, items, mode, strict) {
   const charges = [];
   const t = (cfg && cfg.tax) || {};
   if (t.enabled) {
-    const chg = (kind, name, amount, rate, sac) => { if (amount > 0) { const gst = money(amount * rate / (100 + rate)); charges.push({ kind, name, amount, gstRate: rate, gst, taxable: money(amount - gst), taxIncl: true, sac: sac || '' }); } };
+    const chg = (kind, name, amount, rate, sac) => { if (amount > 0) charges.push(Object.assign({ kind, name, amount, gstRate: rate, taxIncl: true, sac: sac || '' }, gstParts(amount, rate, true))); };
     chg('delivery', 'Delivery charge', deliveryFee, t.deliveryRate != null && t.deliveryRate !== '' ? num(t.deliveryRate) : 18, t.deliverySac);
     chg('packing', 'Packing charge', packing, t.packingRate != null && t.packingRate !== '' ? num(t.packingRate) : num(t.rate), t.packingSac);
   }
@@ -127,11 +137,11 @@ function priceCart(cfg, products, items, mode, strict) {
   const taxIncluded = money(lines.concat(charges).reduce((s, l) => s + (l.gst && l.taxIncl ? l.gst : 0), 0));
   const byRate = {};
   for (const l of lines.concat(charges)) if (l.gstRate != null) {
-    const r = byRate[l.gstRate] || (byRate[l.gstRate] = { rate: l.gstRate, taxable: 0, gst: 0 });
-    r.taxable = money(r.taxable + l.taxable); r.gst = money(r.gst + l.gst);
+    const r = byRate[l.gstRate] || (byRate[l.gstRate] = { rate: l.gstRate, taxable: 0, gst: 0, cgst: 0, sgst: 0 });
+    r.taxable = money(r.taxable + l.taxable); r.cgst = money(r.cgst + l.cgst); r.sgst = money(r.sgst + l.sgst); r.gst = money(r.cgst + r.sgst);
   }
   // within the state: GST is split half CGST, half SGST
-  const taxBreakup = Object.values(byRate).sort((a, b) => a.rate - b.rate).map(r => Object.assign(r, { cgst: money(r.gst / 2), sgst: money(r.gst - money(r.gst / 2)) }));
+  const taxBreakup = Object.values(byRate).sort((a, b) => a.rate - b.rate);
   return { lines, charges, subtotal, deliveryFee, packing, tax, taxIncluded, taxBreakup, total: money(subtotal + deliveryFee + packing + tax) };
 }
 
@@ -566,5 +576,5 @@ function createCore(env) {
   return { handle, publicUser, cleanProduct };
 }
 
-return { ROLES, CAN, CASH_TO, can, HttpError, createCore, priceCart, storeIsOpen, statusName, flowFor, distanceM };
+return { gstParts, ROLES, CAN, CASH_TO, can, HttpError, createCore, priceCart, storeIsOpen, statusName, flowFor, distanceM };
 });

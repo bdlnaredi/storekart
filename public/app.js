@@ -567,10 +567,15 @@ function chargeNote(pr, kind) {
   const c = (pr.charges || []).find(x => x.kind === kind);
   return c ? ` <span class="small muted">(incl. GST ${c.gstRate}%: ${rupee(c.gst)})</span>` : '';
 }
+const lineCgst = l => l.cgst != null ? l.cgst : Math.round((l.gst || 0) / 2 * 100) / 100;
+const lineSgst = l => l.sgst != null ? l.sgst : Math.round(((l.gst || 0) - lineCgst(l)) * 100) / 100;
 function gstSplit(pr) {
   const added = {};
-  for (const l of (pr.lines || []).concat(pr.charges || [])) if (l.gst && !l.taxIncl) { const r = added[l.gstRate] || (added[l.gstRate] = { rate: l.gstRate, gst: 0 }); r.gst += l.gst; }
-  return Object.values(added).sort((a, b) => a.rate - b.rate).map(r => { const g = Math.round(r.gst * 100) / 100, c = Math.round(g / 2 * 100) / 100; return { rate: r.rate, cgst: c, sgst: Math.round((g - c) * 100) / 100 }; });
+  for (const l of (pr.lines || []).concat(pr.charges || [])) if (l.gst && !l.taxIncl) {
+    const r = added[l.gstRate] || (added[l.gstRate] = { rate: l.gstRate, cgst: 0, sgst: 0 });
+    r.cgst += lineCgst(l); r.sgst += lineSgst(l);
+  }
+  return Object.values(added).sort((a, b) => a.rate - b.rate).map(r => ({ rate: r.rate, cgst: Math.round(r.cgst * 100) / 100, sgst: Math.round(r.sgst * 100) / 100 }));
 }
 function taxRowsHtml(pr) {
   const split = gstSplit(pr);
@@ -616,11 +621,11 @@ function invoiceDoc(o) {
   const walkIn = ['Guest', 'Counter customer'].includes(cu.name);
   const rows = gst
     ? lines.map((l, i) => {
-        const cg = Math.round((l.gst || 0) / 2 * 100) / 100, sg = Math.round(((l.gst || 0) - cg) * 100) / 100;
+        const cg = lineCgst(l), sg = lineSgst(l);
         const amount = l.taxIncl ? l.total : l.total + (l.gst || 0);
         return `<tr><td>${i + 1}</td><td>${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.addons && l.addons.length ? `<div class="sm">+ ${esc(l.addons.map(x => x.name).join(', '))}</div>` : ''}</td><td>${esc(l.hsn || '')}</td><td class="n">${l.qty}</td><td class="n">${fmt2(l.unitPrice)}</td><td class="n">${fmt2(l.taxable)}</td><td class="n">${l.gstRate ?? ''}%</td><td class="n">${fmt2(cg)}</td><td class="n">${fmt2(sg)}</td><td class="n">${fmt2(amount)}</td></tr>`;
       }).concat(charges.map((x, i) => {
-        const cg = Math.round(x.gst / 2 * 100) / 100, sg = Math.round((x.gst - cg) * 100) / 100;
+        const cg = lineCgst(x), sg = lineSgst(x);
         return `<tr><td>${lines.length + i + 1}</td><td>${esc(x.name)}</td><td>${esc(x.sac || '')}</td><td class="n">1</td><td class="n">${fmt2(x.amount)}</td><td class="n">${fmt2(x.taxable)}</td><td class="n">${x.gstRate}%</td><td class="n">${fmt2(cg)}</td><td class="n">${fmt2(sg)}</td><td class="n">${fmt2(x.amount)}</td></tr>`;
       })).join('')
     : lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}</td><td class="n">${l.qty}</td><td class="n">${fmt2(l.unitPrice)}</td><td class="n">${fmt2(l.total)}</td></tr>`).join('')
@@ -1264,9 +1269,9 @@ function renderProductForm(pid) {
     const rate = $('#p-gst').value === '' ? +t.rate || 0 : +$('#p-gst').value;
     const incl = $('#p-incl').value === '' ? t.inclusive !== false : $('#p-incl').value === 'yes';
     if (!price || !t.enabled) { el.textContent = ''; return; }
-    const gst = incl ? price * rate / (100 + rate) : price * rate / 100;
-    el.innerHTML = incl ? `Customer pays <b>${rupee(price)}</b> — includes GST ${rupee(gst)} (CGST ${rupee(gst / 2)} + SGST ${rupee(gst / 2)})`
-      : `Customer pays <b>${rupee(price + gst)}</b> — ${rupee(price)} + GST ${rupee(gst)} (CGST ${rupee(gst / 2)} + SGST ${rupee(gst / 2)})`;
+    const g = Core.gstParts(price, rate, incl);
+    el.innerHTML = incl ? `Customer pays <b>${rupee(price)}</b> — taxable ${rupee(g.taxable)} + CGST ${rupee(g.cgst)} + SGST ${rupee(g.sgst)}`
+      : `Customer pays <b>${rupee(price + g.gst)}</b> — ${rupee(price)} + CGST ${rupee(g.cgst)} + SGST ${rupee(g.sgst)}`;
   };
   ['#p-price', '#p-gst', '#p-incl'].forEach(id => $(id).addEventListener('input', gstEg)); gstEg();
   $('#img-pick').onclick = () => $('#img-file').click();
