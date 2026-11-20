@@ -49,6 +49,21 @@ Notes:
 
 Prices are always recalculated on the server, so nobody can change a price in their browser.
 
+## In the shop: self-order screen and sales counter
+- **Self-order screen** (`/#/kiosk`): put a tablet or touch TV in the shop. Customers choose **Eat here / Take away**, tap items from a big picture menu (with options and add-ons), then **Pay at counter** or **Pay now by UPI**, which shows a QR code. They get a big order number on screen. The screen resets itself after each order or 2 minutes without a touch. Orders can go straight to packing (Settings → In-store screens). To leave the screen, tap the logo 5 times quickly and enter a staff login.
+- **Sales counter** (Staff → **Counter** tab, for cashier, manager, owner and admin): a fast billing screen. Tap items and choose Takeaway / Dine-in (table no.) / Delivery; customer name and phone are optional. Then pay:
+  - **Cash**: type the cash received and it shows the change to give back.
+  - **UPI**: shows a QR code for the exact amount.
+  - **Pay later**: saves the order unpaid.
+
+  It then saves the order (already accepted) and can print the bill. The counter keeps working even when online orders are paused.
+
+## Payments, GST & bills
+- **UPI QR codes** are made inside the app, with no internet service needed. They appear on the customer's order page, on the self-order screen and at the counter, and work with GPay, PhonePe, Paytm, BHIM and bank apps.
+- **Packing charge** is **off** by default. Switch it on and set the amount in Settings → Ordering. It's never added to dine-in orders.
+- **GST**: the setup wizard asks whether GST applies. If yes, it asks for your GSTIN, usual rate and whether prices include GST. Each item can have its own **GST rate, HSN/SAC code and "price includes GST"** choice. Bills show **CGST + SGST** (half each), and the printed **Tax Invoice** shows GSTIN, HSN codes and a rate-wise GST summary.
+- **FSSAI licence number** (Settings → Store) is printed on every bill and shown in the store footer.
+
 ## Android app
 The `android/` folder is an Android Studio project. It gives delivery boys **live location that keeps working with the screen off**, phone notifications for order alerts, and a **📍 GPS & phone test** screen. GitHub builds the APK automatically: on your phone, open Releases → *StoreKart Android (latest)*. See `android/README.md`.
 

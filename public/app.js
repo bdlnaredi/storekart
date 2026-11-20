@@ -11,7 +11,7 @@ const ls = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
-const rupee = n => (S.cfg && S.cfg.currency || '₹') + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+const rupee = n => { const v = Math.round(Number(n || 0) * 100) / 100; return (S.cfg && S.cfg.currency || '₹') + v.toLocaleString('en-IN', Number.isInteger(v) ? { maximumFractionDigits: 0 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
 const uid = () => Math.random().toString(16).slice(2, 14).padEnd(12, '0');
 function toast(msg, kind = '') {
   const t = document.createElement('div');
@@ -132,6 +132,8 @@ function route() {
   window.scrollTo(0, 0);
   stopPolling();
   if (!S.cfg.configured) return renderWizard();
+  document.body.classList.toggle('kiosk-mode', a === 'kiosk');
+  if (a === 'kiosk') return renderKiosk();
   if (a === 'admin') return renderAdmin(b || 'orders', h.split('/').slice(2).join('/'));
   if (a === 'cart') return renderCart();
   if (a === 'checkout') return renderCheckout();
@@ -146,6 +148,8 @@ let pollTimer = null;
 const stopPolling = () => { clearInterval(pollTimer); pollTimer = null; };
 
 // ================= setup wizard =================
+const GSTIN_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+const GST_RATES = [0, 5, 12, 18, 28];
 const COLORS = ['#e23744', '#f97316', '#c2410c', '#ca8a04', '#0c8a3e', '#0f766e', '#0891b2', '#1d4ed8', '#6c4ce0', '#c026d3', '#be185d', '#1b1d21'];
 
 function renderWizard() {
@@ -174,6 +178,7 @@ function renderWizard() {
           <label class="f"><span>Logo emoji</span><input type="text" id="w-emoji" value="${esc(c.logoEmoji || '')}" maxlength="4"></label>
         </div>
         <label class="f"><span>Shop address</span><textarea id="w-addr" placeholder="Shown to customers for pickup">${esc(c.address || '')}</textarea></label>
+        ${['food', 'bakery', 'grocery'].includes(w.type) ? `<label class="f"><span>FSSAI licence number (printed on every bill)</span><input type="text" id="w-fssai" value="${esc(c.fssai || '')}" inputmode="numeric" maxlength="14" placeholder="14-digit number"></label>` : ''}
         <div><span class="small" style="font-weight:600">Brand colour</span>
           <div class="swatches" style="margin-top:8px">${COLORS.map(col => `<button class="swatch ${c.color === col ? 'on' : ''}" style="background:${col}" data-act="wizColor" data-c="${col}" aria-label="${col}"></button>`).join('')}
           <input type="color" id="w-color" value="${esc(c.color)}" style="width:40px;height:34px;border:0;background:none;padding:0"></div></div>
@@ -198,6 +203,15 @@ function renderWizard() {
           <label class="check ${c.payments.includes('upi') ? 'on' : ''}"><input type="checkbox" class="w-pay" value="upi" ${c.payments.includes('upi') ? 'checked' : ''}><span>UPI (GPay, PhonePe, Paytm) — customer pays straight to your UPI ID</span></label>
           <label class="f"><span>Your UPI ID</span><input type="text" id="w-upi" value="${esc(c.upiId)}" placeholder="yourname@okaxis"></label>
         </div></div>
+        <div><b>Is GST applicable to your shop?</b><div class="row wrap" style="margin-top:8px">
+          <label class="check ${c.tax.enabled ? 'on' : ''}"><input type="radio" name="w-gst" value="yes" ${c.tax.enabled ? 'checked' : ''}><span>Yes — I'm GST registered</span></label>
+          <label class="check ${!c.tax.enabled ? 'on' : ''}"><input type="radio" name="w-gst" value="no" ${!c.tax.enabled ? 'checked' : ''}><span>No</span></label></div>
+          <div id="w-gst-box" class="stack ${c.tax.enabled ? '' : 'hidden'}" style="margin-top:10px">
+            <label class="f"><span>GSTIN *</span><input type="text" id="w-gstin" value="${esc(c.tax.gstin || '')}" maxlength="15" placeholder="e.g. 08ABCDE1234F1Z5" style="text-transform:uppercase"></label>
+            <div class="grid2"><label class="f"><span>Usual GST rate</span><select id="w-rate">${[0, 5, 12, 18, 28].map(r => `<option value="${r}" ${+c.tax.rate === r ? 'selected' : ''}>${r}%</option>`).join('')}</select></label>
+            <label class="f"><span>Your prices…</span><select id="w-incl"><option value="0" ${c.tax.inclusive === false ? 'selected' : ''}>Don't include GST — add it on the bill</option><option value="1" ${c.tax.inclusive !== false ? 'selected' : ''}>Already include GST</option></select></label></div>
+            <div class="small muted">${w.type === 'food' ? 'Most restaurants and fast food outlets charge 5% GST (2.5% CGST + 2.5% SGST).' : 'You can set a different GST rate and HSN code for each item later.'}</div>
+          </div></div>
       </div>
       <div class="wiz-nav"><button class="btn lg" data-act="wizBack">← Back</button><span class="spacer"></span><button class="btn primary lg" data-act="wizNext">Continue →</button></div>`;
   } else {
@@ -217,7 +231,10 @@ function renderWizard() {
   }
   app().innerHTML = `<div class="wizard"><div class="narrow" style="max-width:760px">
     <div class="wiz-head"><div class="mark">🛍️</div><h1>Set up your online store</h1>${steps}</div>${body}</div></div>`;
-  if (w.step === 3) $$('.w-mode, .w-pay').forEach(i => i.addEventListener('change', () => i.closest('.check').classList.toggle('on', i.checked)));
+  if (w.step === 3) {
+    $$('.w-mode, .w-pay').forEach(i => i.addEventListener('change', () => i.closest('.check').classList.toggle('on', i.checked)));
+    $$('input[name=w-gst]').forEach(i => i.addEventListener('change', () => { $$('input[name=w-gst]').forEach(x => x.closest('.check').classList.toggle('on', x.checked)); $('#w-gst-box').classList.toggle('hidden', i.value !== 'yes' || !i.checked); }));
+  }
   if (w.step === 4) $('#w-samples').addEventListener('change', e => { w.samples = e.target.checked; e.target.closest('.check').classList.toggle('on', w.samples); });
   if (w.step === 2) $('#w-color').addEventListener('input', e => { readWizStep(); w.cfg.color = e.target.value; applyTheme(w.cfg.color); $$('.swatch').forEach(s => s.classList.remove('on')); });
 }
@@ -226,11 +243,13 @@ function readWizStep() {
   if (w.step === 2) {
     c.name = $('#w-name').value.trim(); c.tagline = $('#w-tag').value.trim(); c.phone = $('#w-phone').value.trim();
     c.logoEmoji = $('#w-emoji').value.trim(); c.address = $('#w-addr').value.trim();
+    if ($('#w-fssai')) c.fssai = $('#w-fssai').value.replace(/\s/g, '');
   }
   if (w.step === 3) {
     c.modes = $$('.w-mode:checked').map(i => i.value);
     c.payments = $$('.w-pay:checked').map(i => i.value);
     c.upiId = $('#w-upi').value.trim();
+    c.tax = { enabled: ($('input[name=w-gst]:checked') || {}).value === 'yes', gstin: $('#w-gstin').value.trim().toUpperCase(), rate: +$('#w-rate').value, inclusive: $('#w-incl').value === '1' };
     c.delivery = Object.assign({}, c.delivery, { fee: +$('#w-fee').value || 0, freeAbove: +$('#w-free').value || 0, minOrder: +$('#w-min').value || 0, eta: $('#w-eta').value.trim() });
   }
 }
@@ -243,12 +262,14 @@ const wizActions = {
     const w = S.wiz, c = w.cfg;
     if (w.step === 2) {
       if (!c.name) return toast('Please enter your store name', 'bad');
+      if (c.fssai && !/^\d{14}$/.test(c.fssai)) return toast('FSSAI licence number has 14 digits (or leave it empty for now)', 'bad');
       if (c.phone.replace(/\D/g, '').length < 10) return toast('Please enter a 10-digit phone number', 'bad');
     }
     if (w.step === 3) {
       if (!c.modes.length) return toast('Pick at least one order type', 'bad');
       if (!c.payments.length) return toast('Pick at least one payment method', 'bad');
       if (c.payments.includes('upi') && !/^[\w.\-]+@[\w]+$/.test(c.upiId)) return toast('Enter a valid UPI ID like name@okaxis', 'bad');
+      if (c.tax.enabled && !GSTIN_RE.test(c.tax.gstin)) return toast('Enter your 15-character GSTIN (e.g. 08ABCDE1234F1Z5)', 'bad');
     }
     w.step++; renderWizard(); window.scrollTo(0, 0);
   },
@@ -361,7 +382,7 @@ function storeFooter() {
     <div class="row wrap" style="gap:24px;align-items:flex-start">
       <div style="flex:1;min-width:220px"><b style="color:var(--ink)">${esc(c.name)}</b>${c.address ? `<div>${esc(c.address)}</div>` : ''}
         ${c.hours && c.hours.enabled ? `<div>Open ${esc(c.hours.open)} – ${esc(c.hours.close)}</div>` : ''}
-        ${c.tax && c.tax.enabled && c.tax.gstin ? `<div>GSTIN: ${esc(c.tax.gstin)}</div>` : ''}</div>
+        ${c.tax && c.tax.enabled && c.tax.gstin ? `<div>GSTIN: ${esc(c.tax.gstin)}</div>` : ''}${c.fssai ? `<div>FSSAI Lic. No.: ${esc(c.fssai)}</div>` : ''}</div>
       <div style="flex:1;min-width:220px">${c.phone ? `<div>📞 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div><div>💬 <a href="${waLink(c.phone, 'Hi ' + c.name + '!')}" target="_blank" rel="noopener">Chat on WhatsApp</a></div>` : ''}
         ${c.policy ? `<div style="margin-top:6px">${esc(c.policy)}</div>` : ''}</div>
     </div>
@@ -378,7 +399,7 @@ function waLink(phone, text) {
 function openModal(html) { $('#modal-root').innerHTML = `<div class="overlay" data-act="closeModal">${html}</div>`; document.body.style.overflow = 'hidden'; }
 function closeModal() { $('#modal-root').innerHTML = ''; document.body.style.overflow = ''; }
 
-function openProduct(id) {
+function openProduct(id, opts = {}) {
   const p = S.products.find(x => x.id === id); if (!p) return;
   const c = S.cfg;
   const st = { variant: (p.variants.find(v => v.inStock !== false) || p.variants[0] || {}).name, option2: p.options2[0], addons: [], qty: 1, note: '' };
@@ -409,19 +430,19 @@ function openProduct(id) {
     $$('[data-o2]', sh).forEach(b => b.onclick = () => { st.option2 = b.dataset.o2; keepNote(); draw(); });
     $$('.opt input[type=checkbox]', sh).forEach(i => i.onchange = () => { st.addons = $$('.opt input[type=checkbox]:checked', sh).map(x => x.value); keepNote(); draw(); });
     $$('[data-q]', sh).forEach(b => b.onclick = () => { st.qty = Math.max(1, Math.min(99, st.qty + +b.dataset.q)); keepNote(); draw(); });
-    $('#p-add').onclick = () => { keepNote(); addToCart(p.id, st); closeModal(); refreshAfterCart(); toast(`Added ${p.name}`, 'ok'); };
+    $('#p-add').onclick = () => { keepNote(); if (opts.onAdd) opts.onAdd(st); else { addToCart(p.id, st); refreshAfterCart(); } closeModal(); toast(`Added ${p.name}`, 'ok'); };
     function keepNote() { st.note = $('#p-note').value; }
   };
   draw();
 }
 
-function addToCart(pid, st) {
+function addItem(list, pid, st) {
   const key = [pid, st.variant || '', st.option2 || '', (st.addons || []).slice().sort().join('+'), st.note || ''].join('|');
-  const ex = S.cart.find(i => i.key === key);
+  const ex = list.find(i => i.key === key);
   if (ex) ex.qty += st.qty || 1;
-  else S.cart.push({ key, productId: pid, variant: st.variant || null, option2: st.option2 || null, addons: st.addons || [], note: st.note || '', qty: st.qty || 1 });
-  saveCart();
+  else list.push({ key, productId: pid, variant: st.variant || null, option2: st.option2 || null, addons: st.addons || [], note: st.note || '', qty: st.qty || 1 });
 }
+function addToCart(pid, st) { addItem(S.cart, pid, st); saveCart(); }
 function refreshAfterCart() {
   const h = location.hash.replace(/^#\/?/, '');
   if (h === '' ) { const y = window.scrollY; renderStore(); window.scrollTo(0, y); }
@@ -447,7 +468,7 @@ function renderCart() {
     <div class="card" style="margin-top:12px"><div class="bill">
       <div class="r"><span>Item total</span><span>${rupee(pr.subtotal)}</span></div>
       ${pr.packing ? `<div class="r"><span>Packing charge</span><span>${rupee(pr.packing)}</span></div>` : ''}
-      ${pr.tax ? `<div class="r"><span>GST (${c.tax.rate}%)</span><span>${rupee(pr.tax)}</span></div>` : ''}
+      ${taxRowsHtml(pr)}
       ${c.modes.includes('delivery') ? `<div class="r muted small"><span>Delivery charge is added at checkout${c.delivery.freeAbove ? ` (free above ${rupee(c.delivery.freeAbove)})` : ''}</span></div>` : ''}
     </div></div>
     ${c.modes.includes('delivery') && c.delivery.freeAbove && pr.subtotal < c.delivery.freeAbove ? `<p class="pill brand" style="margin-top:12px">Add ${rupee(c.delivery.freeAbove - pr.subtotal)} more for free delivery</p>` : ''}
@@ -498,8 +519,7 @@ function renderCheckout() {
         <div class="r" style="border-top:1px solid var(--line);padding-top:6px"><span>Item total</span><span>${rupee(pr.subtotal)}</span></div>
         ${S.mode === 'delivery' ? `<div class="r"><span>Delivery</span><span>${pr.deliveryFee ? rupee(pr.deliveryFee) : '<b style="color:var(--ok)">FREE</b>'}</span></div>` : ''}
         ${pr.packing ? `<div class="r"><span>Packing</span><span>${rupee(pr.packing)}</span></div>` : ''}
-        ${pr.tax ? `<div class="r"><span>GST (${c.tax.rate}%)</span><span>${rupee(pr.tax)}</span></div>` : ''}
-        ${c.tax && c.tax.enabled && c.tax.inclusive ? `<div class="r small muted"><span>Prices include GST</span></div>` : ''}
+        ${taxRowsHtml(pr)}
         <div class="r total"><span>To pay</span><span>${rupee(pr.total)}</span></div>
       </div></div>
       ${short ? `<p class="pill warn" style="margin-top:12px">Minimum order for delivery is ${rupee(d.minOrder)} — add ${rupee(d.minOrder - pr.subtotal)} more.</p>` : ''}
@@ -536,12 +556,35 @@ async function placeOrder(btn) {
   }
 }
 
+// ---- GST rows on bills: CGST + SGST for GST added on top, a note for GST already inside prices ----
+function gstSplit(pr) {
+  const added = {};
+  for (const l of pr.lines || []) if (l.gst && !l.taxIncl) { const r = added[l.gstRate] || (added[l.gstRate] = { rate: l.gstRate, gst: 0 }); r.gst += l.gst; }
+  return Object.values(added).sort((a, b) => a.rate - b.rate).map(r => { const g = Math.round(r.gst * 100) / 100, c = Math.round(g / 2 * 100) / 100; return { rate: r.rate, cgst: c, sgst: Math.round((g - c) * 100) / 100 }; });
+}
+function taxRowsHtml(pr) {
+  const split = gstSplit(pr);
+  let h = '';
+  if (split.length) h += split.map(r => `<div class="r"><span>CGST ${r.rate / 2}%</span><span>${rupee(r.cgst)}</span></div><div class="r"><span>SGST ${r.rate / 2}%</span><span>${rupee(r.sgst)}</span></div>`).join('');
+  else if (pr.tax) h += `<div class="r"><span>GST</span><span>${rupee(pr.tax)}</span></div>`; // older orders
+  if (pr.taxIncluded) h += `<div class="r small muted"><span>Prices include GST of ${rupee(pr.taxIncluded)}</span></div>`;
+  return h;
+}
+const fmt2 = n => Number(n || 0).toFixed(2);
+
 // ---- order tracking ----
 const statusName = (s, mode) => Core.statusName(s, mode, S.cfg && S.cfg.businessType);
 const flowFor = Core.flowFor;
-function upiLink(o) {
+function upiString(amount, note) {
   const c = S.cfg;
-  return `upi://pay?pa=${encodeURIComponent(c.upiId)}&pn=${encodeURIComponent(c.name)}&am=${o.total.toFixed(2)}&cu=INR&tn=${encodeURIComponent('Order #' + o.number)}`;
+  return `upi://pay?pa=${String(c.upiId).trim()}&pn=${encodeURIComponent(c.name)}&am=${Number(amount).toFixed(2)}&cu=INR&tn=${encodeURIComponent(note)}`;
+}
+const upiLink = o => upiString(o.total, 'Order #' + o.number);
+// Scan-to-pay QR (works with GPay, PhonePe, Paytm, BHIM and every bank app)
+function upiQr(amount, note, big) {
+  let svg = ''; try { svg = QR.svg(upiString(amount, note)); } catch { return ''; }
+  return `<div class="qr-box ${big ? 'big' : ''}"><div class="qr">${svg}</div>
+    <div class="qr-cap"><b>${rupee(amount)}</b> · Scan with any UPI app<br><span class="small muted">to ${esc(S.cfg.upiId)}</span></div></div>`;
 }
 function orderSummaryText(o) {
   const mn = MODE_NAMES();
@@ -590,8 +633,9 @@ function trackDynamic(o) {
   const when = s => (o.history.find(h => h.status === s) || {}).at;
   const d = riderDistance(o);
   return `
-    ${o.payment === 'upi' && !o.paid && o.status !== 'cancelled' ? `<div class="card stack" style="margin-top:12px"><b>Pay ${rupee(o.total)} by UPI</b>
-      <a class="btn primary lg block" href="${upiLink(o)}">📲 Pay with UPI app</a>
+    ${o.payment === 'upi' && !o.paid && o.status !== 'cancelled' && S.cfg.upiId ? `<div class="card stack" style="margin-top:12px"><b>Pay ${rupee(o.total)} by UPI</b>
+      ${upiQr(o.total, 'Order #' + o.number)}
+      <a class="btn primary lg block" href="${upiLink(o)}">📲 Pay with UPI app on this phone</a>
       <div class="small muted">Or pay to UPI ID <b>${esc(S.cfg.upiId)}</b> and mention order #${o.number}. The store confirms your payment.</div></div>` : ''}
     ${o.paid ? `<div class="pill ok" style="margin-top:12px">✓ Payment received</div>` : ''}
     ${o.assignedTo && o.status !== 'cancelled' ? `<div class="card rider-card" style="margin-top:12px">
@@ -617,9 +661,10 @@ async function renderOrder(id) {
       ${o.lines.map(l => `<div class="r"><span>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` · ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br><span class="small muted">+ ${esc(l.addons.map(a => a.name).join(', '))}</span>` : ''}</span><span>${rupee(l.total)}</span></div>`).join('')}
       ${o.deliveryFee ? `<div class="r"><span>Delivery</span><span>${rupee(o.deliveryFee)}</span></div>` : ''}
       ${o.packing ? `<div class="r"><span>Packing</span><span>${rupee(o.packing)}</span></div>` : ''}
-      ${o.tax ? `<div class="r"><span>GST</span><span>${rupee(o.tax)}</span></div>` : ''}
+      ${taxRowsHtml(o)}
       <div class="r total"><span>Total</span><span>${rupee(o.total)}</span></div>
     </div>
+    ${S.cfg.fssai || (S.cfg.tax && S.cfg.tax.enabled && S.cfg.tax.gstin) ? `<p class="small muted" style="margin:8px 0 0">${S.cfg.tax && S.cfg.tax.enabled && S.cfg.tax.gstin ? `GSTIN ${esc(S.cfg.tax.gstin)}` : ''}${S.cfg.fssai && S.cfg.tax && S.cfg.tax.enabled && S.cfg.tax.gstin ? ' · ' : ''}${S.cfg.fssai ? `FSSAI Lic. No. ${esc(S.cfg.fssai)}` : ''}</p>` : ''}
     <p class="small muted" style="margin-bottom:0">${esc(MODE_NAMES()[o.mode])}${o.table ? ` · Table ${esc(o.table)}` : ''}${o.slot ? ` · ${esc(o.slot)}` : ''} · ${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${fmtTime(o.createdAt)}</p></div>
     <div class="row wrap" style="margin-top:14px">
       ${S.cfg.phone ? `<a class="btn" style="flex:1" href="${waLink(S.cfg.phone, orderSummaryText(o))}" target="_blank" rel="noopener">💬 Send order on WhatsApp</a><a class="btn" href="tel:${esc(S.cfg.phone)}">📞 Call store</a>` : ''}
@@ -653,6 +698,7 @@ let events = null;
 function staffTabs() {
   const t = [];
   if (can('viewOrders')) t.push(['orders', 'Orders']);
+  if (can('pack')) t.push(['counter', 'Counter']);
   if (S.me && S.me.role === 'delivery') t.push(['deliveries', 'My deliveries']);
   if (can('products')) t.push(['products', L('products') === 'Menu' ? 'Menu' : 'Products']);
   if (can('staff')) t.push(['staff', 'Staff']);
@@ -698,6 +744,7 @@ async function renderAdmin(tab, rest) {
     else if (tab === 'staff') await renderStaff();
     else if (tab === 'settings') renderSettings();
     else if (tab === 'me') renderMe();
+    else if (tab === 'counter') renderCounter();
     connectEvents();
     Tracker.sync();
   } catch (e) {
@@ -728,7 +775,9 @@ function alertStaff(title, body) {
 function onStaffEvent(ev, d) {
   if (!S.me || !location.hash.startsWith('#/admin')) return;
   const r = S.me.role;
-  if (ev === 'order' && ['admin', 'owner', 'manager'].includes(r)) alertStaff(`New order #${d.number} — ${rupee(d.total)}`, d.name || '');
+  const where = d.channel === 'kiosk' ? ' (in-store screen)' : '';
+  if (ev === 'order' && d.channel !== 'counter' && ['admin', 'owner', 'manager'].includes(r)) alertStaff(`New order #${d.number}${where} — ${rupee(d.total)}`, d.name || '');
+  if (ev === 'order' && d.channel === 'kiosk' && d.status === 'accepted' && r === 'cashier') alertStaff(`New order #${d.number}${where} — please pack it`, d.name || '');
   if (ev === 'update' && r === 'cashier' && d.status === 'accepted') alertStaff('Order accepted — please pack it', '');
   if (ev === 'update' && ['admin', 'owner', 'manager'].includes(r) && d.status === 'ready') toast('📦 An order is packed and ready');
   if (ev === 'assigned' && r === 'delivery' && d.riderId === S.me.id) alertStaff(`New delivery #${d.number}`, 'Open My deliveries');
@@ -797,7 +846,7 @@ function orderCard(o) {
   const last = o.history[o.history.length - 1];
   return `<div class="ocard ${o.status === 'new' ? 'new' : ''}">
     <div class="row"><b style="font-size:17px">#${o.number}</b><span class="pill ${pill}">${esc(statusName(o.status, o.mode))}</span><span class="spacer"></span><span class="small muted">${timeAgo(o.createdAt)}</span></div>
-    <div class="small" style="margin-top:6px"><b>${esc(cu.name)}</b> · <a href="tel:${esc(cu.phone)}">${esc(cu.phone)}</a> · <a href="${waLink(cu.phone, `Hi ${cu.name}, about your order #${o.number} from ${S.cfg.name}: `)}" target="_blank" rel="noopener">WhatsApp</a></div>
+    <div class="small" style="margin-top:6px">${o.channel === 'kiosk' ? '<span class="pill brand">🖥️ In-store screen</span> ' : o.channel === 'counter' ? '<span class="pill">🧾 Counter</span> ' : ''}<b>${esc(cu.name)}</b>${cu.phone ? ` · <a href="tel:${esc(cu.phone)}">${esc(cu.phone)}</a> · <a href="${waLink(cu.phone, `Hi ${cu.name}, about your order #${o.number} from ${S.cfg.name}: `)}" target="_blank" rel="noopener">WhatsApp</a>` : ''}</div>
     <div class="small muted">${o.mode === 'delivery' ? '🛵 ' + esc(cu.address + (cu.landmark ? ', ' + cu.landmark : '') + (cu.pincode ? ' - ' + cu.pincode : '')) + (cu.geo ? ` · <a href="https://www.google.com/maps?q=${ll(cu.geo)}" target="_blank" rel="noopener">📍 pin</a>` : '') : o.mode === 'dinein' ? '🍽️ Table ' + esc(o.table) : '🏬 ' + esc(MODE_NAMES().pickup)}${o.slot ? ' · ⏰ ' + esc(o.slot) : ''}</div>
     <div class="oitems">${o.lines.map(l => `<div><span>${l.qty} × ${esc(l.name)}${l.variant ? ` <b>(${esc(l.variant)})</b>` : ''}${l.option2 ? ` · ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br><span class="muted small">+ ${esc(l.addons.map(a => a.name).join(', '))}</span>` : ''}${l.note ? `<br><span class="small" style="color:var(--warn)">“${esc(l.note)}”</span>` : ''}</span><span>${rupee(l.total)}</span></div>`).join('')}
       ${o.note ? `<div class="small" style="color:var(--warn);margin-top:6px">Note: ${esc(o.note)}</div>` : ''}</div>
@@ -985,15 +1034,25 @@ function renderMe() {
 }
 
 function printBill(o) {
-  const c = S.cfg;
-  $('#print-area').innerHTML = `<h2>${esc(c.name)}</h2><div class="c">${esc(c.address || '')}<br>${esc(c.phone || '')}${c.tax && c.tax.enabled && c.tax.gstin ? `<br>GSTIN: ${esc(c.tax.gstin)}` : ''}</div><hr>
-    <div>Order #${o.number}<br>${fmtTime(o.createdAt)}<br>${esc(o.customer.name)} ${esc(o.customer.phone)}<br>${esc(MODE_NAMES()[o.mode])}${o.table ? ' T-' + esc(o.table) : ''}${o.mode === 'delivery' ? '<br>' + esc(o.customer.address) : ''}</div><hr>
-    <table>${o.lines.map(l => `<tr><td>${l.qty} x ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br>&nbsp;+ ${esc(l.addons.map(a => a.name).join(', '))}` : ''}</td><td style="text-align:right">${l.total.toFixed(2)}</td></tr>`).join('')}</table><hr>
-    <table><tr><td>Subtotal</td><td style="text-align:right">${o.subtotal.toFixed(2)}</td></tr>
-    ${o.deliveryFee ? `<tr><td>Delivery</td><td style="text-align:right">${o.deliveryFee.toFixed(2)}</td></tr>` : ''}
-    ${o.packing ? `<tr><td>Packing</td><td style="text-align:right">${o.packing.toFixed(2)}</td></tr>` : ''}
-    ${o.tax ? `<tr><td>GST</td><td style="text-align:right">${o.tax.toFixed(2)}</td></tr>` : ''}
-    <tr><td><b>TOTAL</b></td><td style="text-align:right"><b>₹${o.total.toFixed(2)}</b></td></tr></table><hr>
+  const c = S.cfg, gstOn = !!(c.tax && c.tax.enabled);
+  const lines = o.lines || [];
+  const hasHsn = gstOn && lines.some(l => l.hsn);
+  const breakup = o.taxBreakup && o.taxBreakup.length ? o.taxBreakup : [];
+  const r = (label, val, bold) => `<tr><td>${bold ? '<b>' : ''}${label}${bold ? '</b>' : ''}</td><td class="n">${bold ? '<b>' : ''}${val}${bold ? '</b>' : ''}</td></tr>`;
+  $('#print-area').innerHTML = `<h2>${esc(c.name)}</h2><div class="c">${esc(c.address || '')}${c.phone ? '<br>Ph: ' + esc(c.phone) : ''}
+      ${gstOn && c.tax.gstin ? `<br>GSTIN: ${esc(c.tax.gstin)}` : ''}${c.fssai ? `<br>FSSAI Lic. No.: ${esc(c.fssai)}` : ''}</div>
+    <div class="c inv-title">${gstOn ? 'TAX INVOICE' : 'BILL'}</div><hr>
+    <div>Bill No: ${o.number}<br>Date: ${fmtTime(o.createdAt)}<br>${esc(MODE_NAMES()[o.mode])}${o.table ? ' · Table ' + esc(o.table) : ''}
+      ${o.customer.name && !['Guest', 'Counter customer'].includes(o.customer.name) ? `<br>Customer: ${esc(o.customer.name)}` : ''}${o.customer.phone ? ' ' + esc(o.customer.phone) : ''}${o.mode === 'delivery' ? '<br>' + esc(o.customer.address) : ''}</div><hr>
+    <table><tr><td><b>Item</b></td>${hasHsn ? '<td><b>HSN</b></td>' : ''}<td class="n"><b>Qty</b></td><td class="n"><b>Amt</b></td></tr>
+    ${lines.map(l => `<tr><td>${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br>&nbsp;+ ${esc(l.addons.map(a => a.name).join(', '))}` : ''}${gstOn && l.gstRate != null ? `<br>&nbsp;@ ${fmt2(l.unitPrice)} · GST ${l.gstRate}%${l.taxIncl ? ' incl.' : ''}` : ''}</td>${hasHsn ? `<td>${esc(l.hsn || '')}</td>` : ''}<td class="n">${l.qty}</td><td class="n">${fmt2(l.total)}</td></tr>`).join('')}</table><hr>
+    <table>${r('Item total', fmt2(o.subtotal))}
+    ${o.deliveryFee ? r('Delivery', fmt2(o.deliveryFee)) : ''}${o.packing ? r('Packing', fmt2(o.packing)) : ''}
+    ${gstSplit(o).map(x => r(`CGST @ ${x.rate / 2}%`, fmt2(x.cgst)) + r(`SGST @ ${x.rate / 2}%`, fmt2(x.sgst))).join('') || (o.tax ? r('GST', fmt2(o.tax)) : '')}
+    ${r('TOTAL', '₹' + fmt2(o.total), true)}</table>
+    ${gstOn && breakup.length ? `<hr><table class="gst-t"><tr><td><b>GST%</b></td><td class="n"><b>Taxable</b></td><td class="n"><b>CGST</b></td><td class="n"><b>SGST</b></td></tr>
+      ${breakup.map(x => `<tr><td>${x.rate}%</td><td class="n">${fmt2(x.taxable)}</td><td class="n">${fmt2(x.cgst)}</td><td class="n">${fmt2(x.sgst)}</td></tr>`).join('')}</table>
+      ${o.taxIncluded ? `<div class="c">(Prices include GST of ₹${fmt2(o.taxIncluded)})</div>` : ''}` : ''}<hr>
     <div class="c">${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${o.paid ? 'PAID' : 'UNPAID'}<br>Thank you! Visit again 🙏</div>`;
   if (Native) Native.printPage(); else window.print();
 }
@@ -1067,6 +1126,14 @@ function renderProductForm(pid) {
         <label class="row">Stock qty <input type="number" id="p-stock" value="${p.stock ?? ''}" min="0" placeholder="Unlimited" style="width:110px"></label>
       </div>
     </div>
+    <div class="card" style="margin-top:12px"><h3>🧾 GST</h3>
+      ${c.tax && c.tax.enabled ? '' : `<p class="small" style="margin-top:0;color:var(--warn)">GST is switched off for the store (Settings → Payments & GST). These are saved and used once you switch it on.</p>`}
+      <div class="grid3">
+        <label class="f"><span>GST rate</span><select id="p-gst"><option value="" ${p.gstRate == null ? 'selected' : ''}>Store default (${c.tax ? c.tax.rate : 5}%)</option>${GST_RATES.map(r => `<option value="${r}" ${p.gstRate === r ? 'selected' : ''}>${r}%</option>`).join('')}</select></label>
+        <label class="f"><span>HSN / SAC code</span><input type="text" id="p-hsn" value="${esc(p.hsn || '')}" inputmode="numeric" maxlength="8" placeholder="${c.businessType === 'food' ? 'e.g. 996331' : 'e.g. 1006'}"></label>
+        <label class="f"><span>Price includes GST?</span><select id="p-incl"><option value="" ${p.taxInclusive == null ? 'selected' : ''}>Store default (${c.tax && c.tax.inclusive === false ? 'no' : 'yes'})</option><option value="yes" ${p.taxInclusive === true ? 'selected' : ''}>Yes — price includes GST</option><option value="no" ${p.taxInclusive === false ? 'selected' : ''}>No — add GST on bill</option></select></label>
+      </div>
+      <div class="small muted" id="p-gst-eg"></div></div>
     <div class="card" style="margin-top:12px"><h3>${esc(L('variant'))} options</h3><p class="small muted" style="margin-top:0">e.g. ${c.businessType === 'clothing' ? 'S, M, L, XL (same price)' : c.businessType === 'grocery' ? '500 g ₹40, 1 kg ₹75' : c.businessType === 'food' ? 'Regular ₹149, Large ₹299 / Half, Full' : 'different sizes or packs'}. Leave empty if there's just one. Each option's price replaces the selling price.</p>
       ${rowsEditor('v-rows', p.variants || [], true, true)}
       <button class="btn sm ghost" data-act="sameSizes">Quick add sizes…</button></div>
@@ -1076,6 +1143,18 @@ function renderProductForm(pid) {
       ${rowsEditor('a-rows', p.addons || [], true, false)}</div>
     <div class="row" style="margin-top:16px">${isNew ? '' : `<button class="btn danger" data-act="delProduct" data-id="${p.id}">Delete</button>`}<span class="spacer"></span><a class="btn" href="#/admin/products">Cancel</a><button class="btn primary lg" data-act="saveProduct" data-id="${isNew ? '' : p.id}">Save</button></div>
   </div>`);
+  // live example: what the customer pays for this price
+  const gstEg = () => {
+    const el = $('#p-gst-eg'); if (!el) return;
+    const t = c.tax || {}, price = +$('#p-price').value || 0;
+    const rate = $('#p-gst').value === '' ? +t.rate || 0 : +$('#p-gst').value;
+    const incl = $('#p-incl').value === '' ? t.inclusive !== false : $('#p-incl').value === 'yes';
+    if (!price || !t.enabled) { el.textContent = ''; return; }
+    const gst = incl ? price * rate / (100 + rate) : price * rate / 100;
+    el.innerHTML = incl ? `Customer pays <b>${rupee(price)}</b> — includes GST ${rupee(gst)} (CGST ${rupee(gst / 2)} + SGST ${rupee(gst / 2)})`
+      : `Customer pays <b>${rupee(price + gst)}</b> — ${rupee(price)} + GST ${rupee(gst)} (CGST ${rupee(gst / 2)} + SGST ${rupee(gst / 2)})`;
+  };
+  ['#p-price', '#p-gst', '#p-incl'].forEach(id => $(id).addEventListener('input', gstEg)); gstEg();
   $('#img-pick').onclick = () => $('#img-file').click();
   $('#img-file').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -1112,7 +1191,8 @@ async function saveProduct(btn) {
     name, category: $('#p-cat').value, price, mrp: +$('#p-mrp').value || null, unit: $('#p-unit').value.trim(), description: $('#p-desc').value.trim(),
     emoji: $('#p-emoji').value.trim(), image: S.editImage, inStock: $('#p-instock').checked, featured: $('#p-feat').checked,
     veg: vegSel === 'veg' ? true : vegSel === 'nonveg' ? false : null, stock: stockV === '' ? null : +stockV,
-    variants, options2: $('#p-opt2').value.split(',').map(s => s.trim()).filter(Boolean), addons: readRows('a-rows').map(({ name, price }) => ({ name, price })),
+    variants, options2: $('#p-opt2').value.split(',').map(s => s.trim()).filter(Boolean),
+    gstRate: $('#p-gst').value === '' ? null : +$('#p-gst').value, hsn: $('#p-hsn').value.trim(), taxInclusive: $('#p-incl').value === 'yes' ? true : $('#p-incl').value === 'no' ? false : null, addons: readRows('a-rows').map(({ name, price }) => ({ name, price })),
   };
   btn.disabled = true;
   try {
@@ -1125,7 +1205,7 @@ async function saveProduct(btn) {
 
 // ---- settings ----
 function renderSettings() {
-  const c = S.cfg, d = c.delivery || {}, t = c.tax || {}, h = c.hours || {}, lb = c.labels || {};
+  const c = S.cfg, d = c.delivery || {}, t = c.tax || {}, h = c.hours || {}, lb = c.labels || {}, k = c.kiosk || {};
   const sw = (id, on, text) => `<label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><i></i></span>${text}</label>`;
   app().innerHTML = adminShell('settings', `<div class="narrow" style="max-width:820px;padding:16px 0">
     <h2>Settings</h2>
@@ -1137,6 +1217,7 @@ function renderSettings() {
       <div class="row"><div class="logo" style="width:56px;height:56px;font-size:28px" id="logo-prev">${c.logoImage ? `<img src="${esc(c.logoImage)}">` : esc(c.logoEmoji || '🛍️')}</div>
         <button class="btn sm" data-act="pickLogo">Upload logo image</button>${c.logoImage ? `<button class="btn sm ghost danger" data-act="rmLogo">Remove</button>` : ''}<input type="file" id="logo-file" accept="image/*" class="hidden"></div>
       <label class="f"><span>Address</span><textarea id="s-addr">${esc(c.address || '')}</textarea></label>
+      <label class="f"><span>FSSAI licence number (printed on bills)</span><input type="text" id="s-fssai" value="${esc(c.fssai || '')}" inputmode="numeric" maxlength="14" placeholder="14 digits — leave empty if not needed"></label>
       <label class="f"><span>Policy / note in footer (returns, warranty…)</span><input type="text" id="s-policy" value="${esc(c.policy || '')}"></label>
       <div><span class="small" style="font-weight:600">Brand colour</span><div class="swatches" style="margin-top:8px">${COLORS.map(col => `<button class="swatch ${c.color === col ? 'on' : ''}" style="background:${col}" data-act="setColor" data-c="${col}"></button>`).join('')}<input type="color" id="s-color" value="${esc(c.color)}" style="width:40px;height:34px;border:0;background:none;padding:0"></div></div>
     </div>
@@ -1147,20 +1228,31 @@ function renderSettings() {
       <div class="grid3"><label class="f"><span>Delivery charge (₹)</span><input type="number" id="s-fee" value="${d.fee || 0}" min="0"></label>
         <label class="f"><span>Free delivery above (₹, 0 = never)</span><input type="number" id="s-free" value="${d.freeAbove || 0}" min="0"></label>
         <label class="f"><span>Minimum delivery order (₹)</span><input type="number" id="s-min" value="${d.minOrder || 0}" min="0"></label></div>
-      <div class="grid2"><label class="f"><span>Delivery time shown</span><input type="text" id="s-eta" value="${esc(d.eta || '')}"></label>
-        <label class="f"><span>Packing charge per order (₹)</span><input type="number" id="s-pack" value="${c.packingCharge || 0}" min="0"></label></div>
+      <label class="f"><span>Delivery time shown</span><input type="text" id="s-eta" value="${esc(d.eta || '')}"></label>
+      <div class="row wrap">${sw('s-pack-on', c.packingEnabled, 'Add a packing charge of ₹')}<input type="number" id="s-pack" value="${c.packingCharge || 0}" min="0" style="width:100px"> per order</div>
+      <div class="small muted" style="margin-top:-6px">Off by default. When on, it's added to takeaway and delivery orders only — never to dine-in.</div>
       ${sw('s-slots-on', c.features && c.features.slots, 'Let customers choose a time slot')}
       <label class="f"><span>Time slots (one per line)</span><textarea id="s-slots">${esc((c.slots || []).join('\n'))}</textarea></label>
       <label class="f"><span>Google Maps API key (optional)</span><input type="text" id="s-maps" value="${esc(c.mapsKey || '')}" placeholder="Leave empty — maps work without it"></label>
       <div class="small muted">Live delivery maps work without a key. Add a free “Maps Embed API” key from Google Cloud only if the map ever stops loading.</div>
     </div>
+    <div class="card set-section stack"><h3>🖥️ In-store screens</h3>
+      ${sw('s-kiosk', k.enabled, 'Self-order screen for customers (tablet / TV at the shop)')}
+      ${sw('s-kiosk-auto', k.autoAccept !== false, 'Send self-order screen orders straight to packing (skip manager accept)')}
+      <label class="f"><span>Welcome message on the self-order screen</span><input type="text" id="s-kiosk-msg" value="${esc(k.welcome || 'Order here')}"></label>
+      <div class="row wrap">${sw('s-kiosk-counter', k.payAtCounter !== false, 'Allow “Pay at counter”')}${sw('s-kiosk-upi', k.upi !== false, 'Allow “Pay now by UPI QR”')}</div>
+      <div class="kiosk-links"><div><b>Self-order screen</b><div class="small muted">Open this on the shop tablet:</div><code>${esc(location.href.split('#')[0])}#/kiosk</code>
+        <a class="btn sm" href="#/kiosk" target="_blank">Open ↗</a></div>
+        <div><b>Sales counter</b><div class="small muted">Cashier logs in and taps the <b>Counter</b> tab:</div><code>${esc(location.href.split('#')[0])}#/admin/counter</code></div></div>
+    </div>
     <div class="card set-section stack"><h3>💳 Payments & GST</h3>
       <div class="row wrap">${['cod', 'upi'].map(p => `<label class="check ${(c.payments || []).includes(p) ? 'on' : ''}"><input type="checkbox" class="s-pay" value="${p}" ${(c.payments || []).includes(p) ? 'checked' : ''}><span>${p === 'cod' ? 'Cash / pay on delivery' : 'UPI'}</span></label>`).join('')}</div>
       <label class="f"><span>UPI ID</span><input type="text" id="s-upi" value="${esc(c.upiId || '')}" placeholder="yourname@okaxis"></label>
-      ${sw('s-tax', t.enabled, 'Show GST')}
-      <div class="grid3"><label class="f"><span>GST rate %</span><input type="number" id="s-rate" value="${t.rate ?? 5}" min="0" step="0.5"></label>
-        <label class="f"><span>Prices</span><select id="s-incl"><option value="1" ${t.inclusive !== false ? 'selected' : ''}>Already include GST</option><option value="0" ${t.inclusive === false ? 'selected' : ''}>Add GST on top</option></select></label>
-        <label class="f"><span>GSTIN (on bills)</span><input type="text" id="s-gstin" value="${esc(t.gstin || '')}"></label></div>
+      ${sw('s-tax', t.enabled, 'GST applicable — charge GST and print tax invoices')}
+      <div class="grid3"><label class="f"><span>Default GST rate</span><select id="s-rate">${GST_RATES.concat(GST_RATES.includes(+t.rate) ? [] : [+t.rate || 0]).map(r => `<option value="${r}" ${+(t.rate ?? 5) === r ? 'selected' : ''}>${r}%</option>`).join('')}</select></label>
+        <label class="f"><span>Item prices…</span><select id="s-incl"><option value="1" ${t.inclusive !== false ? 'selected' : ''}>Already include GST</option><option value="0" ${t.inclusive === false ? 'selected' : ''}>Don't include — add GST on bill</option></select></label>
+        <label class="f"><span>GSTIN</span><input type="text" id="s-gstin" value="${esc(t.gstin || '')}" maxlength="15" style="text-transform:uppercase"></label></div>
+      <div class="small muted">Bills show CGST and SGST (half each). Any item can have its own GST rate, HSN code and “price includes GST” choice — edit the item in ${esc(L('products') === 'Menu' ? 'Menu' : 'Products')}.</div>
     </div>
     <div class="card set-section stack"><h3>🏷️ Categories</h3>
       <div id="cats">${c.categories.map((cat, i) => `<div class="cat-row"><input type="text" class="cat-in" value="${esc(cat)}"><button class="icon-btn" data-act="catUp" data-i="${i}" title="Move up">↑</button><button class="icon-btn" data-act="catDel" data-i="${i}" title="Remove">🗑️</button></div>`).join('')}</div>
@@ -1198,6 +1290,8 @@ async function saveSettings(btn) {
   if (!modes.length) return toast('Keep at least one order type', 'bad');
   if (!payments.length) return toast('Keep at least one payment method', 'bad');
   if (payments.includes('upi') && !/^[\w.\-]+@[\w]+$/.test(v('#s-upi'))) return toast('Enter a valid UPI ID', 'bad');
+  if (ch('#s-tax') && !GSTIN_RE.test(v('#s-gstin').toUpperCase())) return toast('Enter your 15-character GSTIN to charge GST', 'bad');
+  if (v('#s-fssai') && !/^\d{14}$/.test(v('#s-fssai').replace(/\s/g, ''))) return toast('FSSAI licence number has 14 digits', 'bad');
   const cats = $$('.cat-in').map(i => i.value.trim()).filter(Boolean);
   const old = S.cfg.categories;
   const body = {
@@ -1205,8 +1299,9 @@ async function saveSettings(btn) {
     acceptingOrders: ch('#s-accept'), hours: { enabled: ch('#s-hours'), open: v('#s-open'), close: v('#s-close') },
     modes, payments, upiId: v('#s-upi'),
     delivery: { fee: +v('#s-fee') || 0, freeAbove: +v('#s-free') || 0, minOrder: +v('#s-min') || 0, eta: v('#s-eta') },
-    packingCharge: +v('#s-pack') || 0, mapsKey: v('#s-maps'), slots: v('#s-slots').split('\n').map(s => s.trim()).filter(Boolean),
-    tax: { enabled: ch('#s-tax'), rate: +v('#s-rate') || 0, inclusive: v('#s-incl') === '1', gstin: v('#s-gstin') },
+    packingCharge: +v('#s-pack') || 0, packingEnabled: ch('#s-pack-on'), mapsKey: v('#s-maps'),
+    kiosk: { enabled: ch('#s-kiosk'), autoAccept: ch('#s-kiosk-auto'), welcome: v('#s-kiosk-msg'), payAtCounter: ch('#s-kiosk-counter'), upi: ch('#s-kiosk-upi') }, slots: v('#s-slots').split('\n').map(s => s.trim()).filter(Boolean),
+    tax: { enabled: ch('#s-tax'), rate: +v('#s-rate') || 0, inclusive: v('#s-incl') === '1', gstin: v('#s-gstin').toUpperCase() }, fssai: v('#s-fssai').replace(/\s/g, ''),
     categories: cats,
     labels: Object.assign({}, S.cfg.labels, { variant: v('#s-l-var') || 'Option', option2: v('#s-l-o2'), addons: v('#s-l-add') || 'Extras', pickup: v('#s-l-pick') || 'Pickup', cta: v('#s-l-cta') || 'Add', products: v('#s-l-prods') }),
     features: Object.assign({}, S.cfg.features, { veg: ch('#s-veg'), mrp: ch('#s-mrp'), slots: ch('#s-slots-on') }),
@@ -1223,9 +1318,258 @@ async function saveSettings(btn) {
   btn.disabled = false;
 }
 
+// ================= in-store self-order screen (#/kiosk) =================
+// A tablet or touch screen in the shop. Customers order and pay by themselves; staff see the order instantly.
+const K = { step: 'welcome', mode: 'dinein', cart: [], cat: null, name: '', table: '', pay: null, done: null, idle: null, taps: 0 };
+const kioskCfg = () => S.cfg.kiosk || {};
+const kioskCanUpi = () => kioskCfg().upi !== false && !!S.cfg.upiId;
+function kioskReset() { Object.assign(K, { step: 'welcome', cart: [], cat: null, name: '', table: '', pay: null, done: null }); closeModal(); renderKiosk(); }
+function kioskTouch() {
+  clearTimeout(K.idle);
+  if (K.step === 'welcome' || K.step === 'done') return;
+  K.idle = setTimeout(() => { if (location.hash.startsWith('#/kiosk')) kioskReset(); }, 120000); // 2 min untouched → start over
+}
+
+function renderKiosk() {
+  const c = S.cfg, k = kioskCfg();
+  kioskTouch();
+  if (!k.enabled) { app().innerHTML = `<div class="kiosk"><div class="k-welcome"><div class="k-logo">🖥️</div><h1>Self-order screen is off</h1><p>Switch it on in Staff → Settings → In-store screens.</p><a class="btn lg" href="#/admin/settings">Open settings</a></div></div>`; return; }
+  const logo = `<div class="k-logo" data-act="kioskSecret">${c.logoImage ? `<img src="${esc(c.logoImage)}" alt="">` : esc(c.logoEmoji || '🍔')}</div>`;
+  if (!c.isOpen) { app().innerHTML = `<div class="kiosk"><div class="k-welcome">${logo}<h1>${esc(c.name)}</h1><p>Sorry, we're not taking orders right now.</p></div></div>`; return; }
+
+  if (K.step === 'welcome') {
+    app().innerHTML = `<div class="kiosk"><div class="k-welcome">${logo}<h1>${esc(k.welcome || 'Order here')}</h1><p>${esc(c.name)}</p>
+      <div class="k-modes"><button class="k-mode" data-act="kioskMode" data-m="dinein"><span>🍽️</span>Eat here</button><button class="k-mode" data-act="kioskMode" data-m="pickup"><span>🛍️</span>Take away</button></div>
+      <p class="k-hint">Tap to start</p></div></div>`;
+    return;
+  }
+
+  const pr = priceCart(c, S.products, K.cart, K.mode);
+  const count = K.cart.reduce((s, i) => s + i.qty, 0);
+  const top = `<header class="k-top">${logo}<div class="k-title"><b>${esc(c.name)}</b><button class="k-chip" data-act="kioskModeSwitch">${K.mode === 'dinein' ? '🍽️ Eat here' : '🛍️ Take away'} · change</button></div><span class="spacer"></span><button class="btn" data-act="kioskStartOver">✕ Start over</button></header>`;
+
+  if (K.step === 'menu') {
+    const cats = c.categories.filter(cat => S.products.some(p => p.category === cat));
+    if (!K.cat || !cats.includes(K.cat)) K.cat = cats[0];
+    const list = S.products.filter(p => p.category === K.cat);
+    app().innerHTML = `<div class="kiosk">${top}<div class="k-body">
+      <nav class="k-cats">${cats.map(cat => `<button class="${cat === K.cat ? 'on' : ''}" data-act="kioskCat" data-c="${esc(cat)}">${esc(cat)}</button>`).join('')}</nav>
+      <main class="k-grid">${list.map(p => {
+        const q = K.cart.filter(i => i.productId === p.id).reduce((s, i) => s + i.qty, 0);
+        return `<button class="k-item ${p.inStock ? '' : 'off'}" data-act="kioskPick" data-id="${p.id}" ${p.inStock ? '' : 'disabled'}>
+          <div class="k-img">${imgOrEmoji(p)}${q ? `<span class="k-q">${q}</span>` : ''}</div>
+          <div class="k-name">${c.features && c.features.veg && p.veg != null ? `<span class="veg-dot ${p.veg ? '' : 'nv'}"></span> ` : ''}${esc(p.name)}</div>
+          <div class="k-price">${p.inStock ? rupee(fromPrice(p)) : 'Sold out'}</div></button>`;
+      }).join('')}</main>
+      <aside class="k-cart">${kioskCartHtml(pr)}</aside>
+    </div>${count ? `<button class="k-bar" data-act="kioskReview">${count} item${count > 1 ? 's' : ''} · ${rupee(pr.total)} — Review order →</button>` : ''}</div>`;
+    return;
+  }
+
+  if (K.step === 'review') {
+    if (!K.cart.length) { K.step = 'menu'; return renderKiosk(); }
+    const pays = [k.payAtCounter !== false ? ['cod', '💵', 'Pay at counter', 'Cash or card when you collect'] : null, kioskCanUpi() ? ['upi', '📲', 'Pay now by UPI', 'Scan a QR code with GPay, PhonePe, Paytm'] : null].filter(Boolean);
+    if (!K.pay || !pays.some(p => p[0] === K.pay)) K.pay = pays.length ? pays[0][0] : 'cod';
+    app().innerHTML = `<div class="kiosk">${top}<div class="k-review">
+      <div class="k-panel"><h2>Your order</h2>${kioskLines()}
+        <div class="bill" style="margin-top:12px">${pr.packing ? `<div class="r"><span>Packing</span><span>${rupee(pr.packing)}</span></div>` : ''}${taxRowsHtml(pr)}<div class="r total"><span>Total</span><span>${rupee(pr.total)}</span></div></div>
+        <button class="btn lg block" style="margin-top:12px" data-act="kioskBack">+ Add more</button></div>
+      <div class="k-panel"><h2>Almost done</h2>
+        <label class="f"><span>Your name (we'll call it out)</span><input type="text" id="k-name" value="${esc(K.name)}" placeholder="Optional" autocomplete="off"></label>
+        ${K.mode === 'dinein' ? `<label class="f" style="margin-top:10px"><span>Table number</span><input type="text" id="k-table" value="${esc(K.table)}" inputmode="numeric" placeholder="Optional"></label>` : ''}
+        <h3 style="margin-top:16px">How would you like to pay?</h3>
+        <div class="k-pays">${pays.map(([v, e, t, d]) => `<button class="k-pay ${K.pay === v ? 'on' : ''}" data-act="kioskPay" data-v="${v}"><span>${e}</span><b>${t}</b><small>${d}</small></button>`).join('')}</div>
+        <button class="btn primary lg block k-place" data-act="kioskPlace">Place order · ${rupee(pr.total)}</button></div>
+    </div></div>`;
+    return;
+  }
+
+  if (K.step === 'done') {
+    const o = K.done;
+    app().innerHTML = `<div class="kiosk"><div class="k-done">
+      <div class="k-check">✓</div><h1>Thank you${o.name && o.name !== 'Guest' ? ', ' + esc(o.name) : ''}!</h1>
+      <div class="k-token"><small>Your order number</small><b>${o.number}</b></div>
+      ${o.payment === 'upi' && kioskCanUpi() ? `<div class="k-qr">${upiQr(o.total, 'Order #' + o.number, true)}<p>Scan with your phone to pay. We'll start right away.</p></div>`
+        : `<p class="k-big">Please pay <b>${rupee(o.total)}</b> at the counter.</p>`}
+      <p>${o.mode === 'dinein' ? `We'll bring it to ${o.table ? 'table ' + esc(o.table) : 'you'} — or listen for number <b>${o.number}</b>.` : `Collect your order when we call number <b>${o.number}</b>.`}</p>
+      <button class="btn primary lg" data-act="kioskStartOver">New order <span id="k-count"></span></button></div></div>`;
+    let n = o.payment === 'upi' ? 90 : 30;
+    const tick = () => { const el = $('#k-count'); if (!el || K.step !== 'done') return clearInterval(t); el.textContent = `(${n})`; if (n-- <= 0) { clearInterval(t); kioskReset(); } };
+    const t = setInterval(tick, 1000); tick();
+  }
+}
+function kioskLines() {
+  const lines = priceCart(S.cfg, S.products, K.cart, K.mode).lines;
+  return lines.map((l, i) => `<div class="line"><div class="thumb">${imgOrEmoji(l)}</div><div style="flex:1;min-width:0"><b>${esc(l.name)}</b>
+    <div class="small muted">${[l.variant, ...l.addons.map(a => '+ ' + a.name)].filter(Boolean).map(esc).join(' · ')}${l.note ? ` · “${esc(l.note)}”` : ''}</div>
+    <div class="row" style="margin-top:6px"><div class="stepper k-step"><button data-act="kioskQty" data-i="${i}" data-d="-1">−</button><span>${l.qty}</span><button data-act="kioskQty" data-i="${i}" data-d="1">+</button></div><span class="spacer"></span><b>${rupee(l.total)}</b></div></div></div>`).join('');
+}
+function kioskCartHtml(pr) {
+  if (!K.cart.length) return `<div class="empty" style="padding:30px 10px"><div class="big">🛒</div>Tap an item to add it</div>`;
+  return `<h3>Your order</h3>${kioskLines()}<div class="bill"><div class="r total"><span>Total</span><span>${rupee(pr.total)}</span></div></div>
+    <button class="btn primary lg block" style="margin-top:12px" data-act="kioskReview">Review & pay →</button>`;
+}
+function kioskStay() { const g = $('.k-grid'), y = g ? g.scrollTop : 0; renderKiosk(); const g2 = $('.k-grid'); if (g2) g2.scrollTop = y; }
+
+// ================= sales counter billing (#/admin/counter) =================
+const CT = { cart: [], mode: 'pickup', table: '', name: '', phone: '', address: '', pay: 'cod', cash: '', cat: 'All', q: '' };
+function counterTotals() { return priceCart(S.cfg, S.products, CT.cart, CT.mode); }
+async function renderCounter() {
+  if (!S.products.length) S.products = await Api.get('/api/products');
+  const c = S.cfg;
+  const cats = ['All', ...c.categories.filter(cat => S.products.some(p => p.category === cat))];
+  if (!cats.includes(CT.cat)) CT.cat = 'All';
+  const q = CT.q.toLowerCase();
+  const list = S.products.filter(p => (CT.cat === 'All' || p.category === CT.cat) && (!q || p.name.toLowerCase().includes(q)));
+  const modes = [['pickup', '🛍️ Takeaway'], ['dinein', '🍽️ Dine-in']].concat((c.modes || []).includes('delivery') ? [['delivery', '🛵 Delivery']] : []);
+  const pr = counterTotals();
+  const count = CT.cart.reduce((s, i) => s + i.qty, 0);
+  app().innerHTML = adminShell('counter', `<div class="pos">
+    <section class="pos-menu">
+      <div class="row" style="margin:12px 0 8px"><input type="search" id="ct-q" placeholder="Search item…" value="${esc(CT.q)}" autocomplete="off"></div>
+      <div class="chips" style="padding:0 0 8px">${cats.map(cat => `<button class="chip ${CT.cat === cat ? 'on' : ''}" data-act="ctCat" data-c="${esc(cat)}">${esc(cat)}</button>`).join('')}</div>
+      <div class="pos-grid">${list.map(p => {
+        const n = CT.cart.filter(i => i.productId === p.id).reduce((s, i) => s + i.qty, 0);
+        return `<button class="pos-item ${p.inStock ? '' : 'off'}" data-act="ctPick" data-id="${p.id}" ${p.inStock ? '' : 'disabled'}>${n ? `<span class="k-q">${n}</span>` : ''}<span class="pos-e">${p.image ? `<img src="${esc(p.image)}" alt="">` : esc(p.emoji || '🍽️')}</span><span class="pos-n">${c.features && c.features.veg && p.veg != null ? `<span class="veg-dot ${p.veg ? '' : 'nv'}"></span> ` : ''}${esc(p.name)}</span><span class="pos-p">${p.inStock ? rupee(fromPrice(p)) + (hasChoices(p) ? ' +' : '') : 'Sold out'}</span></button>`;
+      }).join('') || '<div class="empty">No items</div>'}</div>
+    </section>
+    <aside class="pos-bill card" id="bill">
+      <div class="seg">${modes.map(([m, t]) => `<button class="${CT.mode === m ? 'on' : ''}" data-act="ctMode" data-m="${m}">${t}</button>`).join('')}</div>
+      <div class="grid2" style="margin-top:10px">
+        ${CT.mode === 'dinein' ? `<label class="f"><span>Table</span><input type="text" id="ct-table" value="${esc(CT.table)}" inputmode="numeric"></label>` : ''}
+        <label class="f"><span>Customer name</span><input type="text" id="ct-name" value="${esc(CT.name)}" placeholder="Optional"></label>
+        <label class="f"><span>Mobile</span><input type="tel" id="ct-phone" value="${esc(CT.phone)}" placeholder="Optional"></label>
+      </div>
+      ${CT.mode === 'delivery' ? `<label class="f" style="margin-top:8px"><span>Delivery address *</span><input type="text" id="ct-addr" value="${esc(CT.address)}"></label>` : ''}
+      <div class="pos-lines">${pr.lines.length ? pr.lines.map((l, i) => `<div class="pos-line"><div style="flex:1;min-width:0"><b>${esc(l.name)}</b>${l.variant ? ` <span class="muted">(${esc(l.variant)})</span>` : ''}${l.addons.length ? `<div class="small muted">+ ${esc(l.addons.map(a => a.name).join(', '))}</div>` : ''}${l.note ? `<div class="small" style="color:var(--warn)">“${esc(l.note)}”</div>` : ''}</div>
+        <div class="stepper"><button data-act="ctQty" data-i="${i}" data-d="-1">−</button><span>${l.qty}</span><button data-act="ctQty" data-i="${i}" data-d="1">+</button></div><b class="pos-lt">${rupee(l.total)}</b></div>`).join('') : '<div class="empty" style="padding:24px 0">Tap items to add them to the bill</div>'}</div>
+      ${pr.lines.length ? `<div class="bill">
+        <div class="r"><span>Items (${count})</span><span>${rupee(pr.subtotal)}</span></div>
+        ${pr.deliveryFee ? `<div class="r"><span>Delivery</span><span>${rupee(pr.deliveryFee)}</span></div>` : ''}
+        ${pr.packing ? `<div class="r"><span>Packing</span><span>${rupee(pr.packing)}</span></div>` : ''}
+        ${taxRowsHtml(pr)}
+        <div class="r total pos-total"><span>Total</span><span>${rupee(pr.total)}</span></div></div>
+      <div class="seg" style="margin-top:12px">${[['cod', '💵 Cash'], ['upi', '📲 UPI'], ['later', '🕘 Pay later']].map(([v, t]) => `<button class="${CT.pay === v ? 'on' : ''}" data-act="ctPay" data-v="${v}">${t}</button>`).join('')}</div>
+      ${CT.pay === 'cod' ? `<div class="cash-box"><label class="f"><span>Cash received (₹)</span><input type="number" id="ct-cash" value="${esc(CT.cash)}" min="0" inputmode="numeric"></label>
+        <div class="row wrap" style="gap:6px;margin-top:6px">${[pr.total, ...[100, 200, 500, 2000].filter(n => n > pr.total)].slice(0, 4).map(n => `<button class="btn sm" data-act="ctCash" data-n="${n}">${n === pr.total ? 'Exact' : '₹' + n}</button>`).join('')}</div>
+        <div class="change" id="ct-change">${changeText(pr.total)}</div></div>` : ''}
+      <div class="row" style="margin-top:12px;gap:8px"><button class="btn" data-act="ctClear">Clear</button>
+        <button class="btn primary lg" style="flex:1" data-act="ctPlace">${CT.pay === 'upi' ? '📲 Show UPI QR' : CT.pay === 'later' ? 'Save order (unpaid)' : '✓ Paid — save order'} · ${rupee(pr.total)}</button></div>` : ''}
+    </aside></div>
+    ${count ? `<a class="pos-jump" href="#bill" data-act="ctJump">🧾 Bill · ${count} item${count > 1 ? 's' : ''} · ${rupee(pr.total)}</a>` : ''}`);
+  const qi = $('#ct-q');
+  qi.oninput = () => { CT.q = qi.value; const pos = qi.selectionStart; counterKeep(); renderCounter().then(() => { const n = $('#ct-q'); n.focus(); n.setSelectionRange(pos, pos); }); };
+  const cash = $('#ct-cash');
+  if (cash) cash.oninput = () => { CT.cash = cash.value; $('#ct-change').innerHTML = changeText(counterTotals().total); };
+}
+function changeText(total) {
+  const got = Number(CT.cash);
+  if (!CT.cash) return '<span class="muted">Enter cash received to see the change</span>';
+  if (got < total) return `<span style="color:var(--bad)">Short by ${rupee(total - got)}</span>`;
+  return `Give back <b>${rupee(Math.round((got - total) * 100) / 100)}</b>`;
+}
+function counterKeep() {
+  const v = id => $(id) ? $(id).value.trim() : null;
+  if (v('#ct-table') != null) CT.table = v('#ct-table');
+  if (v('#ct-name') != null) CT.name = v('#ct-name');
+  if (v('#ct-phone') != null) CT.phone = v('#ct-phone');
+  if (v('#ct-addr') != null) CT.address = v('#ct-addr');
+  if (v('#ct-cash') != null) CT.cash = v('#ct-cash');
+}
+function counterRedraw() { const y = window.scrollY; counterKeep(); renderCounter().then(() => window.scrollTo(0, y)); }
+async function counterPlace(paid) {
+  counterKeep();
+  const pr = counterTotals();
+  if (CT.mode === 'delivery' && !CT.address) return toast('Enter the delivery address', 'bad');
+  if (CT.phone && CT.phone.replace(/\D/g, '').length < 10) return toast('Mobile number should be 10 digits (or leave it empty)', 'bad');
+  if (paid && CT.pay === 'cod' && CT.cash && Number(CT.cash) < pr.total) return toast('Cash received is less than the total', 'bad');
+  try {
+    const r = await Api.post('/api/orders', {
+      channel: 'counter', mode: CT.mode, table: CT.table, payment: CT.pay === 'upi' ? 'upi' : 'cod', paid, cashGiven: CT.pay === 'cod' ? Number(CT.cash) || 0 : 0,
+      customer: { name: CT.name, phone: CT.phone, address: CT.address },
+      items: CT.cart.map(i => ({ productId: i.productId, variant: i.variant, option2: i.option2, addons: i.addons, qty: i.qty, note: i.note })),
+    });
+    const change = paid && CT.pay === 'cod' && Number(CT.cash) > r.total ? Math.round((Number(CT.cash) - r.total) * 100) / 100 : 0;
+    Object.assign(CT, { cart: [], table: '', name: '', phone: '', address: '', cash: '' });
+    S.products = await Api.get('/api/products');
+    renderCounter();
+    openModal(`<div class="sheet" data-stop><div class="sheet-body" style="text-align:center">
+      <div style="font-size:46px">✅</div><h2>Order #${r.number} saved</h2>
+      <p class="muted">${rupee(r.total)} · ${paid ? 'Paid' : 'Not paid yet'}${change ? ` · <b style="color:var(--ink)">Give back ${rupee(change)}</b>` : ''}</p>
+      <div class="row" style="gap:8px"><button class="btn lg" style="flex:1" data-act="ctPrint" data-id="${r.id}">🖨️ Print bill</button><button class="btn primary lg" style="flex:1" data-act="closeModal">Next customer</button></div>
+    </div></div>`);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function counterUpiModal() {
+  counterKeep();
+  if (!S.cfg.upiId) return toast('Add your UPI ID in Settings → Payments first', 'bad');
+  const total = counterTotals().total;
+  openModal(`<div class="sheet" data-stop><div class="sheet-body" style="text-align:center">
+    <div class="row"><h2 style="flex:1;margin:0">Customer scans to pay</h2><button class="icon-btn" data-act="closeModal">✕</button></div>
+    ${upiQr(total, S.cfg.name + ' counter bill', true)}
+    <p class="small muted">Check the payment on your UPI app / soundbox, then tap below.</p>
+    <button class="btn primary lg block" data-act="ctUpiDone">✓ Payment received — save order</button>
+    <button class="btn block" style="margin-top:8px" data-act="ctUpiLater">Save without payment</button>
+  </div></div>`);
+}
+
 // ================= click actions =================
 const actions = Object.assign({}, wizActions, {
-  closeModal(el, e) { if (e.target === el || el.classList.contains('icon-btn')) closeModal(); },
+  // ---- self-order screen ----
+  kioskMode(el) { K.mode = el.dataset.m; K.step = 'menu'; renderKiosk(); },
+  kioskModeSwitch() { K.mode = K.mode === 'dinein' ? 'pickup' : 'dinein'; renderKiosk(); },
+  kioskStartOver() { kioskReset(); },
+  kioskCat(el) { K.cat = el.dataset.c; renderKiosk(); },
+  kioskPick(el) {
+    const p = S.products.find(x => x.id === el.dataset.id);
+    if (hasChoices(p)) openProduct(p.id, { onAdd: st => { addItem(K.cart, p.id, st); kioskStay(); } });
+    else { addItem(K.cart, p.id, { variant: p.variants[0] && p.variants[0].name, qty: 1 }); kioskStay(); }
+  },
+  kioskQty(el) { const lines = K.cart; const i = +el.dataset.i; lines[i].qty += +el.dataset.d; if (lines[i].qty <= 0) lines.splice(i, 1); if (K.step === 'review') { K.name = ($('#k-name') || {}).value || K.name; K.table = ($('#k-table') || {}).value || K.table; } kioskStay(); },
+  kioskReview() { K.step = 'review'; renderKiosk(); },
+  kioskBack() { K.name = $('#k-name').value; K.table = ($('#k-table') || {}).value || ''; K.step = 'menu'; renderKiosk(); },
+  kioskPay(el) { K.name = $('#k-name').value; K.table = ($('#k-table') || {}).value || ''; K.pay = el.dataset.v; renderKiosk(); },
+  async kioskPlace(el) {
+    K.name = $('#k-name').value.trim(); K.table = ($('#k-table') || {}).value || '';
+    el.disabled = true;
+    try {
+      const r = await Api.post('/api/orders', { channel: 'kiosk', mode: K.mode, table: K.table, payment: K.pay, customer: { name: K.name },
+        items: K.cart.map(i => ({ productId: i.productId, variant: i.variant, option2: i.option2, addons: i.addons, qty: i.qty, note: i.note })) });
+      K.done = { id: r.id, number: r.number, total: r.total, payment: K.pay, mode: K.mode, table: K.table, name: K.name };
+      K.step = 'done'; K.cart = []; $('#toasts').innerHTML = ''; S.products = await Api.get('/api/products'); renderKiosk();
+    } catch (e) { toast(e.message, 'bad'); el.disabled = false; if (e.status === 409) { S.products = await Api.get('/api/products'); S.cfg = await Api.get('/api/config'); } }
+  },
+  kioskSecret() {
+    // tap the logo 5 times quickly to leave the self-order screen (staff only)
+    K.taps = (K.lastTap && Date.now() - K.lastTap < 1500) ? K.taps + 1 : 1; K.lastTap = Date.now();
+    if (K.taps < 5) return;
+    K.taps = 0;
+    openModal(`<div class="sheet" data-stop><div class="sheet-body stack"><h2>Staff: leave self-order screen</h2>
+      <label class="f"><span>Login name</span><input type="text" id="kx-u" autocapitalize="none"></label><label class="f"><span>Password / PIN</span><input type="password" id="kx-p"></label>
+      <div class="row"><button class="btn" data-act="closeModal">Cancel</button><span class="spacer"></span><button class="btn primary" data-act="kioskExit">Exit</button></div></div></div>`);
+  },
+  async kioskExit() {
+    try { const r = await Api.post('/api/login', { username: $('#kx-u').value, password: $('#kx-p').value }); ls.set('sk_token', r.token); ls.set('sk_user', r.user); S.me = r.user; closeModal(); go('#/admin/' + homeTab()); }
+    catch (e) { toast(e.message, 'bad'); }
+  },
+  // ---- sales counter ----
+  ctCat(el) { CT.cat = el.dataset.c; counterRedraw(); },
+  ctPick(el) {
+    const p = S.products.find(x => x.id === el.dataset.id);
+    if (hasChoices(p)) { counterKeep(); openProduct(p.id, { onAdd: st => { addItem(CT.cart, p.id, st); counterRedraw(); } }); }
+    else { addItem(CT.cart, p.id, { variant: p.variants[0] && p.variants[0].name, qty: 1 }); counterRedraw(); }
+  },
+  ctQty(el) { const i = +el.dataset.i; CT.cart[i].qty += +el.dataset.d; if (CT.cart[i].qty <= 0) CT.cart.splice(i, 1); counterRedraw(); },
+  ctMode(el) { CT.mode = el.dataset.m; counterRedraw(); },
+  ctPay(el) { CT.pay = el.dataset.v; counterRedraw(); },
+  ctCash(el) { CT.cash = el.dataset.n; $('#ct-cash').value = CT.cash; $('#ct-change').innerHTML = changeText(counterTotals().total); },
+  ctClear() { if (CT.cart.length && !confirm('Clear this bill?')) return; Object.assign(CT, { cart: [], table: '', name: '', phone: '', address: '', cash: '' }); renderCounter(); },
+  ctPlace() { if (CT.pay === 'upi') return counterUpiModal(); counterPlace(CT.pay === 'cod'); },
+  ctUpiDone() { closeModal(); counterPlace(true); },
+  ctUpiLater() { closeModal(); counterPlace(false); },
+  ctJump() { $('#bill').scrollIntoView({ behavior: 'smooth' }); },
+  async ctPrint(el) { try { const o = await Api.get('/api/orders/' + el.dataset.id); closeModal(); printBill(o); } catch (e) { toast(e.message, 'bad'); } },
+  closeModal(el, e) { if (!el.classList.contains('overlay') || e.target === el) closeModal(); }, // any close button, or a tap outside the sheet
   open(el) { openProduct(el.dataset.id); },
   quickAdd(el) {
     const p = S.products.find(x => x.id === el.dataset.id);
@@ -1351,7 +1695,7 @@ document.addEventListener('click', e => {
   if (!el) return;
   // clicks on controls inside a product card shouldn't also open the card
   if (el.dataset.act === 'open' && e.target.closest('[data-stop], .add-btn, .stepper') && !e.target.closest('.add-btn[data-act=open]')) return;
-  if (el.dataset.act === 'closeModal' && e.target.closest('[data-stop]') && !e.target.closest('.icon-btn[data-act=closeModal]')) return;
+  if (el.classList.contains('overlay') && e.target.closest('[data-stop]')) return; // taps inside the sheet don't close it
   const fn = actions[el.dataset.act];
   if (!fn) return;
   if (el.tagName === 'A') e.preventDefault();
@@ -1366,6 +1710,8 @@ document.addEventListener('change', async e => {
   try { await Api.patch('/api/orders/' + sel.dataset.assign, { assignTo: sel.value }); toast(sel.value ? `Assigned to ${sel.options[sel.selectedIndex].text.replace(/ \(.*/, '')}` : 'Delivery boy removed', 'ok'); renderAdminOrders(); }
   catch (err) { toast(err.message, 'bad'); renderAdminOrders(); }
 });
+
+document.addEventListener('pointerdown', () => { if (document.body.classList.contains('kiosk-mode')) kioskTouch(); }, true);
 
 // ================= boot =================
 (async function boot() {

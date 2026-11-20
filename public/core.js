@@ -89,15 +89,34 @@ function priceCart(cfg, products, items, mode, strict) {
     const option2 = opts2.includes(it.option2) ? it.option2 : (opts2[0] || null);
     const addons = (Array.isArray(it.addons) ? it.addons : []).map(n => (p.addons || []).find(a => a.name === n)).filter(Boolean).map(a => ({ name: a.name, price: a.price }));
     unit = money(unit + addons.reduce((s, a) => s + a.price, 0));
-    lines.push({ productId: p.id, name: p.name, image: p.image || '', emoji: p.emoji || '', variant, option2, addons, unitPrice: unit, qty, total: money(unit * qty), note: str(it.note, 200) });
+    const line = { productId: p.id, name: p.name, image: p.image || '', emoji: p.emoji || '', variant, option2, addons, unitPrice: unit, qty, total: money(unit * qty), note: str(it.note, 200), hsn: p.hsn || '' };
+    // GST per item: its own rate and "price includes GST" choice, or the store's default
+    const t = (cfg && cfg.tax) || {};
+    if (t.enabled) {
+      const rate = p.gstRate != null && p.gstRate !== '' ? num(p.gstRate) : num(t.rate);
+      const incl = p.taxInclusive === true || p.taxInclusive === false ? p.taxInclusive : t.inclusive !== false;
+      const gst = incl ? money(line.total * rate / (100 + rate)) : money(line.total * rate / 100);
+      Object.assign(line, { gstRate: rate, taxIncl: incl, gst, taxable: incl ? money(line.total - gst) : line.total });
+    }
+    lines.push(line);
   }
   const subtotal = money(lines.reduce((s, l) => s + l.total, 0));
   const d = (cfg && cfg.delivery) || {};
   let deliveryFee = 0;
   if (mode === 'delivery') deliveryFee = d.freeAbove && subtotal >= d.freeAbove ? 0 : money(d.fee);
-  const packing = lines.length ? money(cfg.packingCharge || 0) : 0;
-  const tax = cfg.tax && cfg.tax.enabled && !cfg.tax.inclusive ? money(subtotal * num(cfg.tax.rate) / 100) : 0;
-  return { lines, subtotal, deliveryFee, packing, tax, total: money(subtotal + deliveryFee + packing + tax) };
+  // packing charge only when switched on in Settings, and never for dine-in
+  const packing = lines.length && cfg.packingEnabled && mode !== 'dinein' ? money(cfg.packingCharge || 0) : 0;
+  // tax = GST added on top of prices; taxIncluded = GST already inside prices (shown for information)
+  const tax = money(lines.reduce((s, l) => s + (l.gst && !l.taxIncl ? l.gst : 0), 0));
+  const taxIncluded = money(lines.reduce((s, l) => s + (l.gst && l.taxIncl ? l.gst : 0), 0));
+  const byRate = {};
+  for (const l of lines) if (l.gstRate != null) {
+    const r = byRate[l.gstRate] || (byRate[l.gstRate] = { rate: l.gstRate, taxable: 0, gst: 0 });
+    r.taxable = money(r.taxable + l.taxable); r.gst = money(r.gst + l.gst);
+  }
+  // within the state: GST is split half CGST, half SGST
+  const taxBreakup = Object.values(byRate).sort((a, b) => a.rate - b.rate).map(r => Object.assign(r, { cgst: money(r.gst / 2), sgst: money(r.gst - money(r.gst / 2)) }));
+  return { lines, subtotal, deliveryFee, packing, tax, taxIncluded, taxBreakup, total: money(subtotal + deliveryFee + packing + tax) };
 }
 
 // ---------------- the store ----------------
@@ -124,6 +143,9 @@ function createCore(env) {
       variants: Array.isArray(p.variants) ? p.variants.slice(0, 30).map(v => ({ name: str(v.name, 40), price: money(v.price), inStock: v.inStock !== false })).filter(v => v.name) : [],
       options2: Array.isArray(p.options2) ? p.options2.map(o => str(o, 40)).filter(Boolean).slice(0, 30) : [],
       addons: Array.isArray(p.addons) ? p.addons.slice(0, 30).map(a => ({ name: str(a.name, 40), price: money(a.price) })).filter(a => a.name) : [],
+      gstRate: p.gstRate === '' || p.gstRate == null ? null : Math.min(40, Math.max(0, num(p.gstRate))), // null = store default
+      hsn: str(p.hsn, 12).replace(/[^\dA-Za-z]/g, ''),
+      taxInclusive: p.taxInclusive === true || p.taxInclusive === false ? p.taxInclusive : null,  // null = store default
       sort: num(p.sort, existing.sort || 0),
       createdAt: existing.createdAt || nowIso(),
     };
@@ -306,17 +328,24 @@ function createCore(env) {
     if (p === '/api/orders' && m === 'POST') {
       const cfg = D.config;
       if (!cfg) fail(400, 'Store is not set up yet.');
-      if (!storeIsOpen(cfg)) fail(409, 'Sorry, the store is closed right now.');
+      // channel: online (website/app), kiosk (self-order screen in the shop), counter (staff billing)
+      const channel = ['kiosk', 'counter'].includes(b.channel) ? b.channel : 'online';
+      if (channel === 'counter') need('pack');
+      if (channel === 'kiosk' && !(cfg.kiosk && cfg.kiosk.enabled)) fail(403, 'The self-order screen is switched off in Settings.');
+      if (channel !== 'counter' && !storeIsOpen(cfg)) fail(409, 'Sorry, the store is closed right now.');
+      const inStore = channel !== 'online';
       const c = b.customer || {};
-      const name = str(c.name, 80), phone = str(c.phone, 20).replace(/[^\d+]/g, '');
+      const name = str(c.name, 80) || (inStore ? (channel === 'kiosk' ? 'Guest' : 'Counter customer') : '');
+      const phone = str(c.phone, 20).replace(/[^\d+]/g, '');
       if (!name) fail(400, 'Please enter your name.');
-      if (phone.replace(/\D/g, '').length < 10) fail(400, 'Please enter a valid 10-digit phone number.');
-      const modes = cfg.modes || ['delivery', 'pickup'];
+      if ((!inStore || phone) && phone.replace(/\D/g, '').length < 10) fail(400, 'Please enter a valid 10-digit phone number.');
+      const modes = inStore ? ['pickup', 'dinein'].concat(channel === 'counter' && (cfg.modes || []).includes('delivery') ? ['delivery'] : []) : (cfg.modes || ['delivery', 'pickup']);
       const mode = modes.includes(b.mode) ? b.mode : modes[0];
       if (mode === 'delivery' && !str(c.address)) fail(400, 'Please enter your delivery address.');
-      if (mode === 'dinein' && !str(b.table, 10)) fail(400, 'Please enter your table number.');
-      const payments = cfg.payments || ['cod'];
+      if (mode === 'dinein' && !inStore && !str(b.table, 10)) fail(400, 'Please enter your table number.');
+      const payments = inStore ? ['cod', 'upi'] : (cfg.payments || ['cod']);
       const payment = payments.includes(b.payment) ? b.payment : payments[0];
+      if (payment === 'upi' && !cfg.upiId) { if (!inStore) fail(400, 'UPI is not set up for this store.'); }
       const priced = priceCart(cfg, D.products, b.items, mode, true);
       if (!priced.lines.length) fail(400, 'Your cart is empty.');
       const d = cfg.delivery || {};
@@ -325,15 +354,26 @@ function createCore(env) {
       let geo = null;
       if (c.geo && Math.abs(num(c.geo.lat, 999)) <= 90 && Math.abs(num(c.geo.lng, 999)) <= 180) geo = { lat: num(c.geo.lat), lng: num(c.geo.lng) };
       const at = nowIso();
+      const placedText = channel === 'kiosk' ? 'Order placed on the in-store screen' : channel === 'counter' ? `Order taken at the counter by ${who(user)}` : 'Order placed';
       const o = Object.assign({
-        id: env.id(), number: ++D.orderSeq, createdAt: at, updatedAt: at, status: 'new',
-        history: [{ status: 'new', at, text: 'Order placed', by: null }],
+        id: env.id(), number: ++D.orderSeq, createdAt: at, updatedAt: at, status: 'new', channel,
+        history: [{ status: 'new', at, text: placedText, by: channel === 'counter' ? by(user) : null }],
         customer: { name, phone, address: str(c.address, 500), landmark: str(c.landmark, 120), pincode: str(c.pincode, 10), geo },
         mode, table: str(b.table, 10), slot: str(b.slot, 60), payment, paid: false, note: str(b.note, 500),
         assignedTo: null, rider: null, trail: [], sharing: false,
       }, priced);
+      // counter orders (and kiosk orders if set) skip the manager's accept step
+      if (channel === 'counter' || (channel === 'kiosk' && cfg.kiosk.autoAccept)) {
+        o.status = 'accepted';
+        o.history.push({ status: 'accepted', at, text: channel === 'counter' ? `Order accepted — by ${who(user)}` : 'Order accepted automatically', by: channel === 'counter' ? by(user) : null });
+      }
+      if (channel === 'counter' && b.paid === true) {
+        o.paid = true;
+        const cash = payment === 'cod' && num(b.cashGiven) > 0 ? ` (cash ₹${money(b.cashGiven)}, change ₹${money(num(b.cashGiven) - o.total)})` : '';
+        o.history.push({ at, text: `Payment of ₹${o.total} received${payment === 'upi' ? ' by UPI' : ' in cash'}${cash} — by ${who(user)}`, by: by(user) });
+      }
       D.orders.unshift(o); env.save();
-      env.emit('order', { id: o.id, number: o.number, total: o.total, name });
+      env.emit('order', { id: o.id, number: o.number, total: o.total, name, channel, status: o.status });
       return { id: o.id, number: o.number, total: o.total };
     }
     if (p === '/api/orders' && m === 'GET') {
