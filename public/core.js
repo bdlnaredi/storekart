@@ -35,6 +35,7 @@ const fail = (s, m) => { throw new HttpError(s, m); };
 const str = (v, max = 500) => (v == null ? '' : String(v)).trim().slice(0, max);
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 const money = v => Math.round(Math.max(0, num(v)) * 100) / 100;
+const rs = n => Number.isInteger(+n) ? String(+n) : (+n).toFixed(2); // 325.9 -> "325.90"
 const by = u => u ? { id: u.id, name: u.name, role: u.role } : null;
 const who = u => u ? `${u.name} (${ROLES[u.role] ? ROLES[u.role].label : u.role})` : '';
 
@@ -106,17 +107,26 @@ function priceCart(cfg, products, items, mode, strict) {
   if (mode === 'delivery') deliveryFee = d.freeAbove && subtotal >= d.freeAbove ? 0 : money(d.fee);
   // packing charge only when switched on in Settings, and never for dine-in
   const packing = lines.length && cfg.packingEnabled && mode !== 'dinein' ? money(cfg.packingCharge || 0) : 0;
+  // GST on delivery and packing charges — already INCLUDED in the amounts set in Settings (the customer pays the same).
+  // Delivery: 18% by default; packing: same as the food rate.
+  const charges = [];
+  const t = (cfg && cfg.tax) || {};
+  if (t.enabled) {
+    const chg = (kind, name, amount, rate, sac) => { if (amount > 0) { const gst = money(amount * rate / (100 + rate)); charges.push({ kind, name, amount, gstRate: rate, gst, taxable: money(amount - gst), taxIncl: true, sac: sac || '' }); } };
+    chg('delivery', 'Delivery charge', deliveryFee, t.deliveryRate != null && t.deliveryRate !== '' ? num(t.deliveryRate) : 18, t.deliverySac);
+    chg('packing', 'Packing charge', packing, t.packingRate != null && t.packingRate !== '' ? num(t.packingRate) : num(t.rate), t.packingSac);
+  }
   // tax = GST added on top of prices; taxIncluded = GST already inside prices (shown for information)
   const tax = money(lines.reduce((s, l) => s + (l.gst && !l.taxIncl ? l.gst : 0), 0));
-  const taxIncluded = money(lines.reduce((s, l) => s + (l.gst && l.taxIncl ? l.gst : 0), 0));
+  const taxIncluded = money(lines.concat(charges).reduce((s, l) => s + (l.gst && l.taxIncl ? l.gst : 0), 0));
   const byRate = {};
-  for (const l of lines) if (l.gstRate != null) {
+  for (const l of lines.concat(charges)) if (l.gstRate != null) {
     const r = byRate[l.gstRate] || (byRate[l.gstRate] = { rate: l.gstRate, taxable: 0, gst: 0 });
     r.taxable = money(r.taxable + l.taxable); r.gst = money(r.gst + l.gst);
   }
   // within the state: GST is split half CGST, half SGST
   const taxBreakup = Object.values(byRate).sort((a, b) => a.rate - b.rate).map(r => Object.assign(r, { cgst: money(r.gst / 2), sgst: money(r.gst - money(r.gst / 2)) }));
-  return { lines, subtotal, deliveryFee, packing, tax, taxIncluded, taxBreakup, total: money(subtotal + deliveryFee + packing + tax) };
+  return { lines, charges, subtotal, deliveryFee, packing, tax, taxIncluded, taxBreakup, total: money(subtotal + deliveryFee + packing + tax) };
 }
 
 // ---------------- the store ----------------
@@ -175,11 +185,19 @@ function createCore(env) {
 
   function checkPw(u, pw) { return !!u && !!u.salt && env.hash(String(pw || ''), u.salt).hash === u.hash; }
 
+  // older orders saved before `pub` existed: strip "— by Rahul (Manager)" and similar
+  const customerText = t => String(t || '')
+    .replace(/\s*—\s*by .+$/, '')
+    .replace(/\s*\((assigned )?by [^)]*\)/, '')
+    .replace(/ at the counter by .+$/, ' at the counter')
+    .replace(/^Delivery boy removed by .+$/, 'Delivery partner changed')
+    .replace(/^Order taken at the counter$/, 'Order placed at the counter');
+
   // what a customer is allowed to see about an order
   function publicOrder(o) {
     const { adminNote, ...rest } = o;
     return Object.assign({}, rest, {
-      history: o.history.map(h => ({ status: h.status, at: h.at, text: h.text, role: h.by ? h.by.role : null })),
+      history: o.history.map(h => ({ status: h.status, at: h.at, text: h.pub || customerText(h.text) })),
       assignedTo: o.assignedTo ? { name: o.assignedTo.name, phone: o.assignedTo.phone } : null,
       trail: (o.trail || []).slice(-150),
     });
@@ -210,10 +228,10 @@ function createCore(env) {
     }
     o.status = s;
     const bt = db().config.businessType;
-    let text = `${statusName(s, o.mode, bt)} — by ${who(user)}`;
-    if (s === 'out' && o.assignedTo) text = `Out for delivery with ${o.assignedTo.name}`;
-    if (s === 'delivered' && o.mode === 'delivery') text = `Delivered by ${o.assignedTo ? o.assignedTo.name : who(user)}`;
-    log(o, user, { status: s, text });
+    let text = `${statusName(s, o.mode, bt)} — by ${who(user)}`, pub = statusName(s, o.mode, bt);
+    if (s === 'out' && o.assignedTo) text = pub = `Out for delivery with ${o.assignedTo.name}`;
+    if (s === 'delivered' && o.mode === 'delivery') { text = `Delivered by ${o.assignedTo ? o.assignedTo.name : who(user)}`; pub = o.assignedTo ? `Delivered by ${o.assignedTo.name}` : 'Delivered'; }
+    log(o, user, { status: s, text, pub });
     if (s === 'delivered' || s === 'cancelled') o.sharing = false;
   }
 
@@ -357,7 +375,7 @@ function createCore(env) {
       const placedText = channel === 'kiosk' ? 'Order placed on the in-store screen' : channel === 'counter' ? `Order taken at the counter by ${who(user)}` : 'Order placed';
       const o = Object.assign({
         id: env.id(), number: ++D.orderSeq, createdAt: at, updatedAt: at, status: 'new', channel,
-        history: [{ status: 'new', at, text: placedText, by: channel === 'counter' ? by(user) : null }],
+        history: [{ status: 'new', at, text: placedText, pub: channel === 'counter' ? 'Order placed at the counter' : placedText, by: channel === 'counter' ? by(user) : null }],
         customer: { name, phone, address: str(c.address, 500), landmark: str(c.landmark, 120), pincode: str(c.pincode, 10), geo },
         mode, table: str(b.table, 10), slot: str(b.slot, 60), payment, paid: false, note: str(b.note, 500),
         assignedTo: null, rider: null, trail: [], sharing: false,
@@ -365,12 +383,12 @@ function createCore(env) {
       // counter orders (and kiosk orders if set) skip the manager's accept step
       if (channel === 'counter' || (channel === 'kiosk' && cfg.kiosk.autoAccept)) {
         o.status = 'accepted';
-        o.history.push({ status: 'accepted', at, text: channel === 'counter' ? `Order accepted — by ${who(user)}` : 'Order accepted automatically', by: channel === 'counter' ? by(user) : null });
+        o.history.push({ status: 'accepted', at, text: channel === 'counter' ? `Order accepted — by ${who(user)}` : 'Order accepted automatically', pub: 'Order accepted', by: channel === 'counter' ? by(user) : null });
       }
       if (channel === 'counter' && b.paid === true) {
         o.paid = true;
         const cash = payment === 'cod' && num(b.cashGiven) > 0 ? ` (cash ₹${money(b.cashGiven)}, change ₹${money(num(b.cashGiven) - o.total)})` : '';
-        o.history.push({ at, text: `Payment of ₹${o.total} received${payment === 'upi' ? ' by UPI' : ' in cash'}${cash} — by ${who(user)}`, by: by(user) });
+        o.history.push({ at, text: `Payment of ₹${rs(o.total)} received${payment === 'upi' ? ' by UPI' : ' in cash'}${cash} — by ${who(user)}`, pub: `Payment of ₹${rs(o.total)} received${payment === 'upi' ? ' by UPI' : ' in cash'}`, by: by(user) });
       }
       D.orders.unshift(o); env.save();
       env.emit('order', { id: o.id, number: o.number, total: o.total, name, channel, status: o.status });
@@ -416,13 +434,13 @@ function createCore(env) {
         if (b.assignTo !== undefined) {
           need('assign');
           if (o.mode !== 'delivery') fail(400, 'Only delivery orders need a delivery boy.');
-          if (!b.assignTo) { if (o.assignedTo) log(o, user, { text: `Delivery boy removed by ${who(user)}` }); o.assignedTo = null; }
+          if (!b.assignTo) { if (o.assignedTo) log(o, user, { text: `Delivery boy removed by ${who(user)}`, pub: 'Delivery partner changed' }); o.assignedTo = null; }
           else {
             const r = D.users.find(u => u.id === b.assignTo && u.role === 'delivery' && u.active !== false);
             if (!r) fail(400, 'Pick an active delivery boy.');
             o.assignedTo = { id: r.id, name: r.name, phone: r.phone || '' };
             o.rider = null; o.trail = []; o.sharing = false;
-            log(o, user, { text: `${r.name} will deliver your order (assigned by ${who(user)})` });
+            log(o, user, { text: `${r.name} will deliver your order (assigned by ${who(user)})`, pub: `${r.name} will deliver your order` });
             env.emit('assigned', { id: o.id, number: o.number, riderId: r.id });
           }
         }
@@ -430,7 +448,9 @@ function createCore(env) {
         if (typeof b.paid === 'boolean' && b.paid !== o.paid) {
           if (!can(user, 'payment') && !isRiderOf(user, o)) fail(403, "Your role can't change payment.");
           o.paid = b.paid;
-          log(o, user, { text: b.paid ? `Payment of ₹${o.total} received${o.payment === 'cod' && user.role === 'delivery' ? ' in cash' : ''} — by ${who(user)}` : `Payment marked unpaid — by ${who(user)}` });
+          const how = o.payment === 'upi' ? ' by UPI' : ' in cash';
+          log(o, user, { text: b.paid ? `Payment of ₹${rs(o.total)} received${how} — by ${who(user)}` : `Payment marked unpaid — by ${who(user)}`,
+            pub: b.paid ? `Payment of ₹${rs(o.total)} received${how}` : 'Payment is still due' });
         }
         if (b.adminNote != null) { need('viewOrders'); o.adminNote = str(b.adminNote, 500); }
         env.save();

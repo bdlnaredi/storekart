@@ -62,6 +62,15 @@ Prices are always recalculated on the server, so nobody can change a price in th
 - **UPI QR codes** are made inside the app, with no internet service needed. They appear on the customer's order page, on the self-order screen and at the counter, and work with GPay, PhonePe, Paytm, BHIM and bank apps.
 - **Packing charge** is **off** by default. Switch it on and set the amount in Settings → Ordering. It's never added to dine-in orders.
 - **GST**: the setup wizard asks whether GST applies. If yes, it asks for your GSTIN, usual rate and whether prices include GST. Each item can have its own **GST rate, HSN/SAC code and "price includes GST"** choice. Bills show **CGST + SGST** (half each), and the printed **Tax Invoice** shows GSTIN, HSN codes and a rate-wise GST summary.
+- **GST on delivery and packing charges**: these amounts already include GST (delivery 18% by default, packing at the food rate; both can be changed in Settings, with optional SAC codes). The customer pays the amount you set, and the bill shows the GST inside it.
+- **Customers see GST per item** ("GST 5% extra: ₹8.90", "GST 18% included: ₹15.10"), plus a GST summary by rate on their order page.
+- **Customer tax invoice**: once an order is paid, the customer's order page shows **"Your tax invoice is ready"**. The invoice includes:
+  - invoice number with financial year (e.g. `26-27/1001`), GSTIN and FSSAI;
+  - HSN/SAC codes, taxable value, CGST and SGST for each line;
+  - a rate-wise GST summary and the amount in words.
+
+  Customers can **Download PDF** (Save as PDF from the print window) or share it on WhatsApp.
+- **Privacy**: customers never see staff names. Their activity log says "Order accepted", "Packed & ready" and so on, and only the delivery boy's name and phone are shown. Staff still see who did what.
 - **FSSAI licence number** (Settings → Store) is printed on every bill and shown in the store footer.
 
 ## Android app

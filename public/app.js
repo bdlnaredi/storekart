@@ -139,6 +139,7 @@ function route() {
   if (a === 'checkout') return renderCheckout();
   if (a === 'order' && b) return renderOrder(b);
   if (a === 'orders') return renderMyOrders();
+  if (a === 'invoice' && b) return renderInvoice(b);
   return renderStore();
 }
 window.addEventListener('hashchange', route);
@@ -462,12 +463,12 @@ function renderCart() {
     <div class="card">${pr.lines.map((l, i) => `<div class="line">
       <div class="thumb">${imgOrEmoji(l)}</div>
       <div style="flex:1;min-width:0"><b>${esc(l.name)}</b>
-        <div class="small muted">${[l.variant, l.option2, ...l.addons.map(a => '+ ' + a.name)].filter(Boolean).map(esc).join(' · ')}${l.note ? `<br>“${esc(l.note)}”` : ''}</div>
+        <div class="small muted">${[l.variant, l.option2, ...l.addons.map(a => '+ ' + a.name)].filter(Boolean).map(esc).join(' · ')}${l.note ? `<br>“${esc(l.note)}”` : ''}</div>${gstNote(l)}
         <div class="row" style="margin-top:6px"><div class="stepper"><button data-act="cartQty" data-i="${i}" data-d="-1">−</button><span>${l.qty}</span><button data-act="cartQty" data-i="${i}" data-d="1">+</button></div><span class="spacer"></span><b>${rupee(l.total)}</b></div>
       </div></div>`).join('')}</div>
     <div class="card" style="margin-top:12px"><div class="bill">
       <div class="r"><span>Item total</span><span>${rupee(pr.subtotal)}</span></div>
-      ${pr.packing ? `<div class="r"><span>Packing charge</span><span>${rupee(pr.packing)}</span></div>` : ''}
+      ${pr.packing ? `<div class="r"><span>Packing charge${chargeNote(pr, 'packing')}</span><span>${rupee(pr.packing)}</span></div>` : ''}
       ${taxRowsHtml(pr)}
       ${c.modes.includes('delivery') ? `<div class="r muted small"><span>Delivery charge is added at checkout${c.delivery.freeAbove ? ` (free above ${rupee(c.delivery.freeAbove)})` : ''}</span></div>` : ''}
     </div></div>
@@ -515,10 +516,10 @@ function renderCheckout() {
         ${pay.map(p => `<label class="opt ${payNow === p ? 'on' : ''}"><input type="radio" name="pay" value="${p}" ${payNow === p ? 'checked' : ''}><span style="flex:1">${p === 'upi' ? '📲 UPI — GPay / PhonePe / Paytm' : S.mode === 'delivery' ? '💵 Cash on delivery' : '💵 Pay at counter'}</span></label>`).join('')}
       </div>
       <div class="card" style="margin-top:12px"><div class="bill">
-        ${pr.lines.map(l => `<div class="r"><span>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}</span><span>${rupee(l.total)}</span></div>`).join('')}
+        ${pr.lines.map(l => `<div class="r"><span>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${gstNote(l)}</span><span>${rupee(l.total)}</span></div>`).join('')}
         <div class="r" style="border-top:1px solid var(--line);padding-top:6px"><span>Item total</span><span>${rupee(pr.subtotal)}</span></div>
-        ${S.mode === 'delivery' ? `<div class="r"><span>Delivery</span><span>${pr.deliveryFee ? rupee(pr.deliveryFee) : '<b style="color:var(--ok)">FREE</b>'}</span></div>` : ''}
-        ${pr.packing ? `<div class="r"><span>Packing</span><span>${rupee(pr.packing)}</span></div>` : ''}
+        ${S.mode === 'delivery' ? `<div class="r"><span>Delivery${chargeNote(pr, 'delivery')}</span><span>${pr.deliveryFee ? rupee(pr.deliveryFee) : '<b style="color:var(--ok)">FREE</b>'}</span></div>` : ''}
+        ${pr.packing ? `<div class="r"><span>Packing${chargeNote(pr, 'packing')}</span><span>${rupee(pr.packing)}</span></div>` : ''}
         ${taxRowsHtml(pr)}
         <div class="r total"><span>To pay</span><span>${rupee(pr.total)}</span></div>
       </div></div>
@@ -557,9 +558,18 @@ async function placeOrder(btn) {
 }
 
 // ---- GST rows on bills: CGST + SGST for GST added on top, a note for GST already inside prices ----
+// small grey line under an item: how much GST it carries
+function gstNote(l) {
+  if (l.gstRate == null) return '';
+  return `<div class="small muted gst-note">GST ${l.gstRate}% ${l.taxIncl ? 'included' : 'extra'}: ${rupee(l.gst)}</div>`;
+}
+function chargeNote(pr, kind) {
+  const c = (pr.charges || []).find(x => x.kind === kind);
+  return c ? ` <span class="small muted">(incl. GST ${c.gstRate}%: ${rupee(c.gst)})</span>` : '';
+}
 function gstSplit(pr) {
   const added = {};
-  for (const l of pr.lines || []) if (l.gst && !l.taxIncl) { const r = added[l.gstRate] || (added[l.gstRate] = { rate: l.gstRate, gst: 0 }); r.gst += l.gst; }
+  for (const l of (pr.lines || []).concat(pr.charges || [])) if (l.gst && !l.taxIncl) { const r = added[l.gstRate] || (added[l.gstRate] = { rate: l.gstRate, gst: 0 }); r.gst += l.gst; }
   return Object.values(added).sort((a, b) => a.rate - b.rate).map(r => { const g = Math.round(r.gst * 100) / 100, c = Math.round(g / 2 * 100) / 100; return { rate: r.rate, cgst: c, sgst: Math.round((g - c) * 100) / 100 }; });
 }
 function taxRowsHtml(pr) {
@@ -571,6 +581,96 @@ function taxRowsHtml(pr) {
   return h;
 }
 const fmt2 = n => Number(n || 0).toFixed(2);
+
+// GST summary table for customers: how much GST they paid at each rate
+function gstSummaryHtml(o) {
+  const br = o.taxBreakup || [];
+  if (!br.length) return '';
+  const total = br.reduce((s, r) => s + r.gst, 0);
+  return `<div class="gst-sum"><div class="row"><b>GST on this order</b><span class="spacer"></span><b>${rupee(total)}</b></div>
+    <table><tr><th>GST</th><th>Value</th><th>CGST</th><th>SGST</th></tr>${br.map(r => `<tr><td>${r.rate}%</td><td>${rupee(r.taxable)}</td><td>${rupee(r.cgst)}</td><td>${rupee(r.sgst)}</td></tr>`).join('')}</table>
+    ${o.taxIncluded ? `<div class="small muted">${rupee(o.taxIncluded)} of this is already included in prices${(o.charges || []).length ? ' and delivery/packing charges' : ''}.</div>` : ''}</div>`;
+}
+// invoice number with financial year, e.g. 26-27/1001 (Indian FY runs April–March)
+function invoiceNo(o) {
+  const d = new Date(o.createdAt), y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+  return `${String(y).slice(2)}-${String(y + 1).slice(2)}/${o.number}`;
+}
+function amountInWords(n) {
+  const a = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  const two = x => x < 20 ? a[x] : b[Math.floor(x / 10)] + (x % 10 ? ' ' + a[x % 10] : '');
+  const three = x => (x >= 100 ? a[Math.floor(x / 100)] + ' Hundred' + (x % 100 ? ' ' : '') : '') + (x % 100 ? two(x % 100) : '');
+  const words = x => {
+    if (!x) return 'Zero';
+    const out = [], cr = Math.floor(x / 1e7); x %= 1e7; const lk = Math.floor(x / 1e5); x %= 1e5; const th = Math.floor(x / 1000); x %= 1000;
+    if (cr) out.push(words(cr) + ' Crore'); if (lk) out.push(two(lk) + ' Lakh'); if (th) out.push(two(th) + ' Thousand'); if (x) out.push(three(x));
+    return out.join(' ');
+  };
+  const r = Math.floor(n + 1e-9), p = Math.round((n - r) * 100);
+  return 'Rupees ' + words(r) + (p ? ' and ' + two(p) + ' Paise' : '') + ' Only';
+}
+function invoiceDoc(o) {
+  const c = S.cfg, gst = !!(c.tax && c.tax.enabled), cu = o.customer || {};
+  const lines = o.lines || [], charges = o.charges || [];
+  const walkIn = ['Guest', 'Counter customer'].includes(cu.name);
+  const rows = gst
+    ? lines.map((l, i) => {
+        const cg = Math.round((l.gst || 0) / 2 * 100) / 100, sg = Math.round(((l.gst || 0) - cg) * 100) / 100;
+        const amount = l.taxIncl ? l.total : l.total + (l.gst || 0);
+        return `<tr><td>${i + 1}</td><td>${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.addons && l.addons.length ? `<div class="sm">+ ${esc(l.addons.map(x => x.name).join(', '))}</div>` : ''}</td><td>${esc(l.hsn || '')}</td><td class="n">${l.qty}</td><td class="n">${fmt2(l.unitPrice)}</td><td class="n">${fmt2(l.taxable)}</td><td class="n">${l.gstRate ?? ''}%</td><td class="n">${fmt2(cg)}</td><td class="n">${fmt2(sg)}</td><td class="n">${fmt2(amount)}</td></tr>`;
+      }).concat(charges.map((x, i) => {
+        const cg = Math.round(x.gst / 2 * 100) / 100, sg = Math.round((x.gst - cg) * 100) / 100;
+        return `<tr><td>${lines.length + i + 1}</td><td>${esc(x.name)}</td><td>${esc(x.sac || '')}</td><td class="n">1</td><td class="n">${fmt2(x.amount)}</td><td class="n">${fmt2(x.taxable)}</td><td class="n">${x.gstRate}%</td><td class="n">${fmt2(cg)}</td><td class="n">${fmt2(sg)}</td><td class="n">${fmt2(x.amount)}</td></tr>`;
+      })).join('')
+    : lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}</td><td class="n">${l.qty}</td><td class="n">${fmt2(l.unitPrice)}</td><td class="n">${fmt2(l.total)}</td></tr>`).join('')
+      + (o.deliveryFee ? `<tr><td>${lines.length + 1}</td><td>Delivery charge</td><td class="n">1</td><td class="n">${fmt2(o.deliveryFee)}</td><td class="n">${fmt2(o.deliveryFee)}</td></tr>` : '')
+      + (o.packing ? `<tr><td>${lines.length + 2}</td><td>Packing charge</td><td class="n">1</td><td class="n">${fmt2(o.packing)}</td><td class="n">${fmt2(o.packing)}</td></tr>` : '');
+  const br = o.taxBreakup || [];
+  const tot = k => br.reduce((s, r) => s + r[k], 0);
+  return `<div class="invoice">
+    <div class="inv-head">
+      <div class="inv-from"><div class="inv-logo">${c.logoImage ? `<img src="${esc(c.logoImage)}" alt="">` : esc(c.logoEmoji || '🛍️')}</div>
+        <div><h2>${esc(c.name)}</h2><div>${esc(c.address || '')}</div>${c.phone ? `<div>Phone: ${esc(c.phone)}</div>` : ''}
+        ${gst && c.tax.gstin ? `<div><b>GSTIN:</b> ${esc(c.tax.gstin)}</div>` : ''}${c.fssai ? `<div><b>FSSAI Lic. No.:</b> ${esc(c.fssai)}</div>` : ''}</div></div>
+      <div class="inv-meta"><div class="inv-title">${gst ? 'TAX INVOICE' : 'INVOICE'}</div>
+        <table><tr><td>Invoice No.</td><td><b>${esc(invoiceNo(o))}</b></td></tr><tr><td>Date</td><td>${new Date(o.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</td></tr>
+        <tr><td>Order No.</td><td>#${o.number}</td></tr><tr><td>Payment</td><td>${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${o.paid ? 'Paid' : 'Due'}</td></tr></table></div>
+    </div>
+    <div class="inv-to"><div class="sm">Billed to</div><b>${esc(walkIn ? 'Walk-in customer' : cu.name)}</b>${cu.phone ? ` · ${esc(cu.phone)}` : ''}
+      ${o.mode === 'delivery' ? `<div>${esc([cu.address, cu.landmark, cu.pincode].filter(Boolean).join(', '))}</div>` : `<div>${esc(MODE_NAMES()[o.mode])}${o.table ? ' · Table ' + esc(o.table) : ''}</div>`}
+      ${gst && c.tax.gstin ? `<div class="sm">Place of supply: state code ${esc(c.tax.gstin.slice(0, 2))}</div>` : ''}</div>
+    <table class="inv-items">${gst
+      ? '<thead><tr><th>#</th><th>Item</th><th>HSN/SAC</th><th class="n">Qty</th><th class="n">Rate</th><th class="n">Taxable</th><th class="n">GST</th><th class="n">CGST</th><th class="n">SGST</th><th class="n">Amount</th></tr></thead>'
+      : '<thead><tr><th>#</th><th>Item</th><th class="n">Qty</th><th class="n">Rate</th><th class="n">Amount</th></tr></thead>'}<tbody>${rows}</tbody></table>
+    <div class="inv-bottom">
+      <div class="inv-words"><div class="sm">Amount in words</div><b>${amountInWords(o.total)}</b>
+        ${gst && br.length ? `<table class="inv-gst"><thead><tr><th>GST rate</th><th class="n">Taxable value</th><th class="n">CGST</th><th class="n">SGST</th><th class="n">Total GST</th></tr></thead><tbody>
+          ${br.map(r => `<tr><td>${r.rate}% (${r.rate / 2}% + ${r.rate / 2}%)</td><td class="n">${fmt2(r.taxable)}</td><td class="n">${fmt2(r.cgst)}</td><td class="n">${fmt2(r.sgst)}</td><td class="n">${fmt2(r.gst)}</td></tr>`).join('')}
+          <tr class="t"><td>Total</td><td class="n">${fmt2(tot('taxable'))}</td><td class="n">${fmt2(tot('cgst'))}</td><td class="n">${fmt2(tot('sgst'))}</td><td class="n">${fmt2(tot('gst'))}</td></tr></tbody></table>` : ''}</div>
+      <table class="inv-totals">
+        ${gst ? `<tr><td>Taxable value</td><td class="n">${fmt2(tot('taxable'))}</td></tr><tr><td>CGST</td><td class="n">${fmt2(tot('cgst'))}</td></tr><tr><td>SGST</td><td class="n">${fmt2(tot('sgst'))}</td></tr>`
+          : `<tr><td>Item total</td><td class="n">${fmt2(o.subtotal)}</td></tr>${o.deliveryFee ? `<tr><td>Delivery</td><td class="n">${fmt2(o.deliveryFee)}</td></tr>` : ''}${o.packing ? `<tr><td>Packing</td><td class="n">${fmt2(o.packing)}</td></tr>` : ''}`}
+        <tr class="grand"><td>Total</td><td class="n">₹${fmt2(o.total)}</td></tr></table>
+    </div>
+    <div class="inv-foot">${o.paid ? `<span class="inv-paid">PAID</span> ` : ''}Thank you for ordering from ${esc(c.name)}! · This is a computer-generated invoice and needs no signature.</div>
+  </div>`;
+}
+async function renderInvoice(id) {
+  let o;
+  try { o = await Api.get('/api/orders/' + id); } catch { app().innerHTML = `${storeHeader('#/')}<div class="narrow"><div class="empty"><div class="big">🤷</div>Invoice not found.</div></div>`; return; }
+  if (!o.paid || o.status === 'cancelled') {
+    app().innerHTML = `${storeHeader('#/order/' + id)}<div class="narrow"><div class="empty"><div class="big">🧾</div>Your invoice will be ready here as soon as payment is received.<br><br><a class="btn" href="#/order/${id}">← Back to order</a></div></div>`;
+    return;
+  }
+  S.invoiceOrder = o;
+  app().innerHTML = `${storeHeader('#/order/' + id)}<div class="inv-page">
+    <div class="inv-tools"><a class="btn" href="#/order/${id}">← Order</a><span class="spacer"></span>
+      <button class="btn primary" data-act="downloadInvoice">⬇️ Download PDF</button>
+      <a class="btn" href="${waLink('', `My invoice from ${S.cfg.name}: ${location.href.split('#')[0]}#/invoice/${id}`)}" target="_blank" rel="noopener">💬 Share</a></div>
+    <div class="small muted inv-hint">Tip: in the print window, choose <b>Save as PDF</b>.</div>
+    <div class="inv-scroll">${invoiceDoc(o)}</div></div>`;
+}
 
 // ---- order tracking ----
 const statusName = (s, mode) => Core.statusName(s, mode, S.cfg && S.cfg.businessType);
@@ -645,6 +745,8 @@ function trackDynamic(o) {
     <div class="card" style="margin-top:12px">
       ${o.status === 'cancelled' ? `<div class="pill bad">This order was cancelled</div>` : `<div class="timeline">${flow.map((s, i) => `<div class="tl ${i <= idx ? 'done' : ''} ${i === idx ? 'cur' : ''}"><div class="dot">${i <= idx ? '✓' : ''}</div><div><div class="t">${esc(statusName(s, o.mode))}</div>${when(s) ? `<div class="small muted">${fmtTime(when(s))}</div>` : ''}</div></div>`).join('')}</div>`}
     </div>
+    ${o.paid && o.status !== 'cancelled' ? `<div class="card inv-ready" style="margin-top:12px"><div class="row"><div class="avatar">🧾</div><div style="flex:1"><b>Your ${S.cfg.tax && S.cfg.tax.enabled ? 'tax invoice' : 'bill'} is ready</b><div class="small muted">Invoice ${esc(invoiceNo(o))} · ${rupee(o.total)} paid</div></div></div>
+      <a class="btn primary block" style="margin-top:10px" href="#/invoice/${o.id}">View & download invoice</a></div>` : ''}
     <div class="card" style="margin-top:12px"><h3>Order activity</h3>${activityHtml(o)}</div>`;
 }
 
@@ -658,12 +760,13 @@ async function renderOrder(id) {
     <div id="map-wrap" style="margin-top:12px">${showMap(o) ? mapBox(o) : ''}</div>
     <div id="track-dyn">${trackDynamic(o)}</div>
     <div class="card" style="margin-top:12px"><div class="bill">
-      ${o.lines.map(l => `<div class="r"><span>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` · ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br><span class="small muted">+ ${esc(l.addons.map(a => a.name).join(', '))}</span>` : ''}</span><span>${rupee(l.total)}</span></div>`).join('')}
-      ${o.deliveryFee ? `<div class="r"><span>Delivery</span><span>${rupee(o.deliveryFee)}</span></div>` : ''}
-      ${o.packing ? `<div class="r"><span>Packing</span><span>${rupee(o.packing)}</span></div>` : ''}
+      ${o.lines.map(l => `<div class="r"><span>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` · ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br><span class="small muted">+ ${esc(l.addons.map(a => a.name).join(', '))}</span>` : ''}${gstNote(l)}</span><span>${rupee(l.total)}</span></div>`).join('')}
+      ${o.deliveryFee ? `<div class="r"><span>Delivery${chargeNote(o, 'delivery')}</span><span>${rupee(o.deliveryFee)}</span></div>` : ''}
+      ${o.packing ? `<div class="r"><span>Packing${chargeNote(o, 'packing')}</span><span>${rupee(o.packing)}</span></div>` : ''}
       ${taxRowsHtml(o)}
       <div class="r total"><span>Total</span><span>${rupee(o.total)}</span></div>
     </div>
+    ${gstSummaryHtml(o)}
     ${S.cfg.fssai || (S.cfg.tax && S.cfg.tax.enabled && S.cfg.tax.gstin) ? `<p class="small muted" style="margin:8px 0 0">${S.cfg.tax && S.cfg.tax.enabled && S.cfg.tax.gstin ? `GSTIN ${esc(S.cfg.tax.gstin)}` : ''}${S.cfg.fssai && S.cfg.tax && S.cfg.tax.enabled && S.cfg.tax.gstin ? ' · ' : ''}${S.cfg.fssai ? `FSSAI Lic. No. ${esc(S.cfg.fssai)}` : ''}</p>` : ''}
     <p class="small muted" style="margin-bottom:0">${esc(MODE_NAMES()[o.mode])}${o.table ? ` · Table ${esc(o.table)}` : ''}${o.slot ? ` · ${esc(o.slot)}` : ''} · ${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${fmtTime(o.createdAt)}</p></div>
     <div class="row wrap" style="margin-top:14px">
@@ -1039,6 +1142,7 @@ function printBill(o) {
   const hasHsn = gstOn && lines.some(l => l.hsn);
   const breakup = o.taxBreakup && o.taxBreakup.length ? o.taxBreakup : [];
   const r = (label, val, bold) => `<tr><td>${bold ? '<b>' : ''}${label}${bold ? '</b>' : ''}</td><td class="n">${bold ? '<b>' : ''}${val}${bold ? '</b>' : ''}</td></tr>`;
+  $('#print-area').className = '';
   $('#print-area').innerHTML = `<h2>${esc(c.name)}</h2><div class="c">${esc(c.address || '')}${c.phone ? '<br>Ph: ' + esc(c.phone) : ''}
       ${gstOn && c.tax.gstin ? `<br>GSTIN: ${esc(c.tax.gstin)}` : ''}${c.fssai ? `<br>FSSAI Lic. No.: ${esc(c.fssai)}` : ''}</div>
     <div class="c inv-title">${gstOn ? 'TAX INVOICE' : 'BILL'}</div><hr>
@@ -1047,12 +1151,12 @@ function printBill(o) {
     <table><tr><td><b>Item</b></td>${hasHsn ? '<td><b>HSN</b></td>' : ''}<td class="n"><b>Qty</b></td><td class="n"><b>Amt</b></td></tr>
     ${lines.map(l => `<tr><td>${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}${l.option2 ? ` ${esc(l.option2)}` : ''}${l.addons && l.addons.length ? `<br>&nbsp;+ ${esc(l.addons.map(a => a.name).join(', '))}` : ''}${gstOn && l.gstRate != null ? `<br>&nbsp;@ ${fmt2(l.unitPrice)} · GST ${l.gstRate}%${l.taxIncl ? ' incl.' : ''}` : ''}</td>${hasHsn ? `<td>${esc(l.hsn || '')}</td>` : ''}<td class="n">${l.qty}</td><td class="n">${fmt2(l.total)}</td></tr>`).join('')}</table><hr>
     <table>${r('Item total', fmt2(o.subtotal))}
-    ${o.deliveryFee ? r('Delivery', fmt2(o.deliveryFee)) : ''}${o.packing ? r('Packing', fmt2(o.packing)) : ''}
+    ${o.deliveryFee ? r('Delivery' + ((o.charges || []).find(x => x.kind === 'delivery') ? ` (incl. GST ${(o.charges.find(x => x.kind === 'delivery')).gstRate}%)` : ''), fmt2(o.deliveryFee)) : ''}${o.packing ? r('Packing' + ((o.charges || []).find(x => x.kind === 'packing') ? ` (incl. GST ${(o.charges.find(x => x.kind === 'packing')).gstRate}%)` : ''), fmt2(o.packing)) : ''}
     ${gstSplit(o).map(x => r(`CGST @ ${x.rate / 2}%`, fmt2(x.cgst)) + r(`SGST @ ${x.rate / 2}%`, fmt2(x.sgst))).join('') || (o.tax ? r('GST', fmt2(o.tax)) : '')}
     ${r('TOTAL', '₹' + fmt2(o.total), true)}</table>
     ${gstOn && breakup.length ? `<hr><table class="gst-t"><tr><td><b>GST%</b></td><td class="n"><b>Taxable</b></td><td class="n"><b>CGST</b></td><td class="n"><b>SGST</b></td></tr>
       ${breakup.map(x => `<tr><td>${x.rate}%</td><td class="n">${fmt2(x.taxable)}</td><td class="n">${fmt2(x.cgst)}</td><td class="n">${fmt2(x.sgst)}</td></tr>`).join('')}</table>
-      ${o.taxIncluded ? `<div class="c">(Prices include GST of ₹${fmt2(o.taxIncluded)})</div>` : ''}` : ''}<hr>
+      ${o.taxIncluded ? `<div class="c">(Includes GST of ₹${fmt2(o.taxIncluded)} inside prices/charges)</div>` : ''}` : ''}<hr>
     <div class="c">${o.payment === 'upi' ? 'UPI' : 'Cash'} · ${o.paid ? 'PAID' : 'UNPAID'}<br>Thank you! Visit again 🙏</div>`;
   if (Native) Native.printPage(); else window.print();
 }
@@ -1252,6 +1356,11 @@ function renderSettings() {
       <div class="grid3"><label class="f"><span>Default GST rate</span><select id="s-rate">${GST_RATES.concat(GST_RATES.includes(+t.rate) ? [] : [+t.rate || 0]).map(r => `<option value="${r}" ${+(t.rate ?? 5) === r ? 'selected' : ''}>${r}%</option>`).join('')}</select></label>
         <label class="f"><span>Item prices…</span><select id="s-incl"><option value="1" ${t.inclusive !== false ? 'selected' : ''}>Already include GST</option><option value="0" ${t.inclusive === false ? 'selected' : ''}>Don't include — add GST on bill</option></select></label>
         <label class="f"><span>GSTIN</span><input type="text" id="s-gstin" value="${esc(t.gstin || '')}" maxlength="15" style="text-transform:uppercase"></label></div>
+      <div class="grid2"><label class="f"><span>GST included in delivery charge</span><select id="s-dgst">${GST_RATES.map(r => `<option value="${r}" ${+(t.deliveryRate ?? 18) === r ? 'selected' : ''}>${r}%</option>`).join('')}</select></label>
+        <label class="f"><span>GST included in packing charge</span><select id="s-pgst"><option value="" ${t.packingRate == null || t.packingRate === '' ? 'selected' : ''}>Same as default rate</option>${GST_RATES.map(r => `<option value="${r}" ${t.packingRate !== '' && t.packingRate != null && +t.packingRate === r ? 'selected' : ''}>${r}%</option>`).join('')}</select></label></div>
+      <div class="grid2"><label class="f"><span>SAC code for delivery (optional)</span><input type="text" id="s-dsac" value="${esc(t.deliverySac || '')}" inputmode="numeric" maxlength="8"></label>
+        <label class="f"><span>SAC/HSN code for packing (optional)</span><input type="text" id="s-psac" value="${esc(t.packingSac || '')}" inputmode="numeric" maxlength="8"></label></div>
+      <div class="small muted">Delivery and packing charges already include GST — the customer pays the amount you set, and the bill shows the GST inside it.</div>
       <div class="small muted">Bills show CGST and SGST (half each). Any item can have its own GST rate, HSN code and “price includes GST” choice — edit the item in ${esc(L('products') === 'Menu' ? 'Menu' : 'Products')}.</div>
     </div>
     <div class="card set-section stack"><h3>🏷️ Categories</h3>
@@ -1301,7 +1410,7 @@ async function saveSettings(btn) {
     delivery: { fee: +v('#s-fee') || 0, freeAbove: +v('#s-free') || 0, minOrder: +v('#s-min') || 0, eta: v('#s-eta') },
     packingCharge: +v('#s-pack') || 0, packingEnabled: ch('#s-pack-on'), mapsKey: v('#s-maps'),
     kiosk: { enabled: ch('#s-kiosk'), autoAccept: ch('#s-kiosk-auto'), welcome: v('#s-kiosk-msg'), payAtCounter: ch('#s-kiosk-counter'), upi: ch('#s-kiosk-upi') }, slots: v('#s-slots').split('\n').map(s => s.trim()).filter(Boolean),
-    tax: { enabled: ch('#s-tax'), rate: +v('#s-rate') || 0, inclusive: v('#s-incl') === '1', gstin: v('#s-gstin').toUpperCase() }, fssai: v('#s-fssai').replace(/\s/g, ''),
+    tax: { enabled: ch('#s-tax'), rate: +v('#s-rate') || 0, inclusive: v('#s-incl') === '1', gstin: v('#s-gstin').toUpperCase(), deliveryRate: +v('#s-dgst'), packingRate: v('#s-pgst') === '' ? null : +v('#s-pgst'), deliverySac: v('#s-dsac').replace(/\D/g, ''), packingSac: v('#s-psac').replace(/\D/g, '') }, fssai: v('#s-fssai').replace(/\s/g, ''),
     categories: cats,
     labels: Object.assign({}, S.cfg.labels, { variant: v('#s-l-var') || 'Option', option2: v('#s-l-o2'), addons: v('#s-l-add') || 'Extras', pickup: v('#s-l-pick') || 'Pickup', cta: v('#s-l-cta') || 'Add', products: v('#s-l-prods') }),
     features: Object.assign({}, S.cfg.features, { veg: ch('#s-veg'), mrp: ch('#s-mrp'), slots: ch('#s-slots-on') }),
@@ -1372,7 +1481,7 @@ function renderKiosk() {
     if (!K.pay || !pays.some(p => p[0] === K.pay)) K.pay = pays.length ? pays[0][0] : 'cod';
     app().innerHTML = `<div class="kiosk">${top}<div class="k-review">
       <div class="k-panel"><h2>Your order</h2>${kioskLines()}
-        <div class="bill" style="margin-top:12px">${pr.packing ? `<div class="r"><span>Packing</span><span>${rupee(pr.packing)}</span></div>` : ''}${taxRowsHtml(pr)}<div class="r total"><span>Total</span><span>${rupee(pr.total)}</span></div></div>
+        <div class="bill" style="margin-top:12px">${pr.packing ? `<div class="r"><span>Packing${chargeNote(pr, 'packing')}</span><span>${rupee(pr.packing)}</span></div>` : ''}${taxRowsHtml(pr)}<div class="r total"><span>Total</span><span>${rupee(pr.total)}</span></div></div>
         <button class="btn lg block" style="margin-top:12px" data-act="kioskBack">+ Add more</button></div>
       <div class="k-panel"><h2>Almost done</h2>
         <label class="f"><span>Your name (we'll call it out)</span><input type="text" id="k-name" value="${esc(K.name)}" placeholder="Optional" autocomplete="off"></label>
@@ -1401,7 +1510,7 @@ function renderKiosk() {
 function kioskLines() {
   const lines = priceCart(S.cfg, S.products, K.cart, K.mode).lines;
   return lines.map((l, i) => `<div class="line"><div class="thumb">${imgOrEmoji(l)}</div><div style="flex:1;min-width:0"><b>${esc(l.name)}</b>
-    <div class="small muted">${[l.variant, ...l.addons.map(a => '+ ' + a.name)].filter(Boolean).map(esc).join(' · ')}${l.note ? ` · “${esc(l.note)}”` : ''}</div>
+    <div class="small muted">${[l.variant, ...l.addons.map(a => '+ ' + a.name)].filter(Boolean).map(esc).join(' · ')}${l.note ? ` · “${esc(l.note)}”` : ''}</div>${gstNote(l)}
     <div class="row" style="margin-top:6px"><div class="stepper k-step"><button data-act="kioskQty" data-i="${i}" data-d="-1">−</button><span>${l.qty}</span><button data-act="kioskQty" data-i="${i}" data-d="1">+</button></div><span class="spacer"></span><b>${rupee(l.total)}</b></div></div></div>`).join('');
 }
 function kioskCartHtml(pr) {
@@ -1445,8 +1554,8 @@ async function renderCounter() {
         <div class="stepper"><button data-act="ctQty" data-i="${i}" data-d="-1">−</button><span>${l.qty}</span><button data-act="ctQty" data-i="${i}" data-d="1">+</button></div><b class="pos-lt">${rupee(l.total)}</b></div>`).join('') : '<div class="empty" style="padding:24px 0">Tap items to add them to the bill</div>'}</div>
       ${pr.lines.length ? `<div class="bill">
         <div class="r"><span>Items (${count})</span><span>${rupee(pr.subtotal)}</span></div>
-        ${pr.deliveryFee ? `<div class="r"><span>Delivery</span><span>${rupee(pr.deliveryFee)}</span></div>` : ''}
-        ${pr.packing ? `<div class="r"><span>Packing</span><span>${rupee(pr.packing)}</span></div>` : ''}
+        ${pr.deliveryFee ? `<div class="r"><span>Delivery${chargeNote(pr, 'delivery')}</span><span>${rupee(pr.deliveryFee)}</span></div>` : ''}
+        ${pr.packing ? `<div class="r"><span>Packing${chargeNote(pr, 'packing')}</span><span>${rupee(pr.packing)}</span></div>` : ''}
         ${taxRowsHtml(pr)}
         <div class="r total pos-total"><span>Total</span><span>${rupee(pr.total)}</span></div></div>
       <div class="seg" style="margin-top:12px">${[['cod', '💵 Cash'], ['upi', '📲 UPI'], ['later', '🕘 Pay later']].map(([v, t]) => `<button class="${CT.pay === v ? 'on' : ''}" data-act="ctPay" data-v="${v}">${t}</button>`).join('')}</div>
@@ -1515,6 +1624,13 @@ function counterUpiModal() {
 
 // ================= click actions =================
 const actions = Object.assign({}, wizActions, {
+  downloadInvoice() {
+    const o = S.invoiceOrder; if (!o) return;
+    const pa = $('#print-area'); pa.className = 'a4'; pa.innerHTML = invoiceDoc(o);
+    const old = document.title; document.title = `Invoice ${invoiceNo(o).replace('/', '-')} - ${S.cfg.name}`;
+    if (Native) Native.printPage(); else window.print();
+    setTimeout(() => { document.title = old; }, 1000);
+  },
   // ---- self-order screen ----
   kioskMode(el) { K.mode = el.dataset.m; K.step = 'menu'; renderKiosk(); },
   kioskModeSwitch() { K.mode = K.mode === 'dinein' ? 'pickup' : 'dinein'; renderKiosk(); },
